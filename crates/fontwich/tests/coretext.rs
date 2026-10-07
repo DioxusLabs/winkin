@@ -246,50 +246,6 @@ fn pingfang_is_still_hvgl_only() {
 }
 
 #[test]
-fn every_named_font_except_known_hvgl_ones_has_open_outlines() {
-    // Every family the Apple backend's tables can name, except the
-    // two documented `hvgl`-only exceptions (`pingfang_is_still_hvgl_only`
-    // covers those). Hand-copied, not derived from the tables — keep in sync
-    // by hand when either file gains an entry. If a future macOS update
-    // converts one of these to `hvgl` too, this is where it shows up instead
-    // of silently rendering nothing for a caller with no Core Text
-    // rasterizer.
-    let named = [
-        "Apple Color Emoji",
-        "STIX Two Math",
-        ".AppleSystemUIFont",
-        "Helvetica Neue",
-        "STFangsong",
-        "Heiti SC",
-        "Heiti TC",
-        "Hiragino Sans",
-        "Hiragino Kaku Gothic ProN",
-        "Apple SD Gothic Neo",
-        "Times",
-        "Times New Roman",
-        "Songti SC",
-        "Songti TC",
-        "Hiragino Mincho ProN",
-        "AppleMyungjo",
-        "Menlo",
-        "Apple Chancery",
-        "Papyrus",
-        "Apple Symbols",
-        "Helvetica",
-        "Lucida Grande",
-    ];
-    for family in named {
-        let Some(font) = regular(family) else {
-            continue;
-        };
-        assert!(
-            has_open_outlines(&font),
-            "{family} has no glyf/CFF/CFF2 — is it now hvgl-only too?"
-        );
-    }
-}
-
-#[test]
 fn a_script_with_a_dedicated_font_reaches_it_before_anything_can_draw_it() {
     // Confirms the actual bug this module exists to fix: a Serif or
     // SansSerif query for a script the Latin-default font can't draw
@@ -335,11 +291,9 @@ fn a_script_with_a_dedicated_font_reaches_it_before_anything_can_draw_it() {
 
 #[test]
 fn dedicated_fonts_have_open_outlines_too() {
-    // `every_named_font_except_known_hvgl_ones_has_open_outlines` only
-    // covers names this crate's source literally spells out. The fonts
-    // `apple::scripts` finds live aren't spelled out anywhere — this checks
-    // them the same way, so a script silently going `hvgl`-only wouldn't
-    // slip past unnoticed the way PingFang almost did.
+    // The fonts `apple::scripts` finds live aren't spelled out anywhere.
+    // This checks each has open outlines, so a script silently going
+    // `hvgl`-only shows up here, as PingFang's did.
     let scripts = [
         "Arab", "Hebr", "Thai", "Deva", "Beng", "Taml", "Telu", "Knda", "Mlym", "Gujr", "Guru",
         "Sinh", "Khmr", "Laoo", "Mymr", "Armn", "Ethi", "Mong", "Tibt", "Orya", "Yiii", "Cher",

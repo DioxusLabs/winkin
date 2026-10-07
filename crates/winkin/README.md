@@ -8,8 +8,11 @@ boxes, paint order, carets, hit testing and selection geometry.
 
 `Config` holds the choices CSS leaves open or where implementations
 differ, with presets per platform; `Config::spec()` follows the CSS
-specifications throughout. The host supplies computed styles, font loading, float
-placement, block layout and painting.
+specifications throughout. The host supplies computed styles, font loading,
+float placement, block layout and painting.
+
+See [the CSS winkin supports](docs/css-support.md) and
+[the showcase](docs/showcase.md) of its output.
 
 ## Usage
 
@@ -109,7 +112,12 @@ Blitz's WPT runner, winkin passes 3,548 of 5,078 tests; Chrome 153 passes
   `Config` fields, and what the host does.
 - The crate docs: the public API, starting at `LayoutBuilder` and `Layout`.
 - [`docs/architecture.md`](docs/architecture.md): how winkin is built.
-- [`docs/showcase.md`](docs/showcase.md): images of winkin's output.
+
+## The name
+
+winkin pays its respects to Wynkyn de Worde, England's most prolific early
+printer, and to Minikin, Android's layout engine. Half typesetter, half
+robot. It also sounds like something you'd do at a well-justified paragraph.
 
 ## Licence
 

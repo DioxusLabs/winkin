@@ -78,6 +78,12 @@ On Linux and the BSDs, libfontconfig is linked by default. Set
 - The crate docs: the public API, starting at `Collection`.
 - [docs/architecture.md](docs/architecture.md): how fontwich is organized.
 
+## The name
+
+fontwich is a sandwich of font layers — system on the bottom, your app in
+the middle, the document's `@font-face` on top — and its whole job is
+answering *which font?* Hold the mayo.
+
 ## Licence
 
 Licensed under either the Apache License, Version 2.0, or the MIT license,

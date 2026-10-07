@@ -2,6 +2,9 @@
 
 CSS inline layout in Rust, and the font crate it uses.
 
+See [the CSS winkin supports](crates/winkin/docs/css-support.md) and
+[the showcase](crates/winkin/docs/showcase.md) of its output.
+
 ## Crates
 
 | Crate | Description |
