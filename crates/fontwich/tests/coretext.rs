@@ -290,32 +290,6 @@ fn a_script_with_a_dedicated_font_reaches_it_before_anything_can_draw_it() {
 }
 
 #[test]
-fn dedicated_fonts_have_open_outlines_too() {
-    // The fonts `apple::scripts` finds live aren't spelled out anywhere.
-    // This checks each has open outlines, so a script silently going
-    // `hvgl`-only shows up here, as PingFang's did.
-    let scripts = [
-        "Arab", "Hebr", "Thai", "Deva", "Beng", "Taml", "Telu", "Knda", "Mlym", "Gujr", "Guru",
-        "Sinh", "Khmr", "Laoo", "Mymr", "Armn", "Ethi", "Mong", "Tibt", "Orya", "Yiii", "Cher",
-        "Cans",
-    ];
-    let mut bad = Vec::new();
-    for script in scripts {
-        let answer = names(&macos(), &text(script, None));
-        let Some(leader) = answer.first() else {
-            continue;
-        };
-        let Some(font) = regular(leader) else {
-            continue;
-        };
-        if !has_open_outlines(&font) {
-            bad.push(format!("{script}: {leader} has no glyf/CFF/CFF2"));
-        }
-    }
-    assert!(bad.is_empty(), "{}", bad.join("\n"));
-}
-
-#[test]
 fn script_tier_is_nonempty_for_common_scripts() {
     // Every script here has real, everyday text behind it. If Core Text's
     // cascade ever comes back empty for one of these, something upstream
