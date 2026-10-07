@@ -64,29 +64,35 @@ jobs:
       - name: Clippy winkin with std and without dictionaries
         run: cargo clippy -p winkin --no-default-features --features std --all-targets -- -D warnings
 
-      # Without `system` or `std`, fontwich holds fonts as bytes and answers
-      # fallback from the shipped tables, which is what a wasm or embedded
-      # consumer gets. Running it on every host catches a backend's `std`
-      # leaking into the core through a path only that host compiles.
+      # The feature combinations test feature wiring, not the platform, so
+      # their tests run on Linux alone; the workspace tests above cover each
+      # platform. Without `system` or `std`, fontwich holds fonts as bytes
+      # and answers fallback from the shipped tables, as a wasm or embedded
+      # consumer gets.
       - name: Test fontwich without default features
+        if: runner.os == 'Linux'
         run: cargo test -p fontwich --no-default-features
 
       # Font files mapped rather than read.
       - name: Test fontwich with mmap
+        if: runner.os == 'Linux'
         run: cargo test -p fontwich --features mmap
 
       - name: Test fontwich with std and without system
+        if: runner.os == 'Linux'
         run: cargo test -p fontwich --no-default-features --features std
 
       # The Android config parser is ordinary code over a file's bytes and is
-      # not gated on the target, so every host runs it against the checked-in
-      # AOSP fixtures. It is the one backend test that asserts exact answers
-      # rather than skipping what is not installed.
+      # not gated on the target, so it runs against the checked-in AOSP
+      # fixtures on any host. It is the one backend test that asserts exact
+      # answers rather than skipping what is not installed.
       - name: Test fontwich's Android backend
+        if: runner.os == 'Linux'
         run: cargo test -p fontwich --features android
 
-      # Clippy runs over each combination as well, since test-only helpers
-      # shared between features are easy to leave dead in one and not another.
+      # Clippy compiles each combination on every platform, which catches a
+      # backend's `std` leaking into the core through a path only that
+      # platform compiles, and test-only helpers left dead in one combination.
       - name: Clippy fontwich with every feature
         run: cargo clippy -p fontwich --all-targets --all-features -- -D warnings
 
