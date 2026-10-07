@@ -1,0 +1,17 @@
+# Store every text file with LF, and check it out with LF on every platform.
+#
+# Without this, a file's line endings depend on whichever tool last wrote it.
+# That produced whole-file rewrites in the diff several times — 349 insertions
+# and 349 deletions for a file whose content had not changed at all — which
+# buries the real change and makes `git blame` useless. Rust tooling is happy
+# with LF on Windows, so there is no reason to keep CRLF anywhere.
+* text=auto eol=lf
+
+# Belt and braces for anything binary that lands here later; font files in
+# particular must never be touched.
+*.ttf binary
+*.otf binary
+*.ttc binary
+*.woff binary
+*.woff2 binary
+*.png binary

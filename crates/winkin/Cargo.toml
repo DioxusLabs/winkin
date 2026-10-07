@@ -1,0 +1,130 @@
+[package]
+name = "winkin"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "One CSS inline formatting context."
+keywords = ["text", "layout", "css", "typography", "bidi"]
+categories = ["text-processing", "graphics", "no-std"]
+exclude = ["docs/showcase"]
+
+[lints.clippy]
+# A module with children is `foo/mod.rs`, never `foo.rs` beside a `foo/`
+# folder, so that a module's files are all in its folder. It holds for every
+# target: an integration test with children is `tests/foo/main.rs`.
+self_named_module_files = "deny"
+
+[features]
+default = ["std", "dictionaries"]
+
+# Nothing here needs std: every table is a Vec, every lookup is ours. Off, the
+# crate is no_std with alloc, as fontwich is, for wasm and embedded hosts. On,
+# it passes std on to fontwich, which then reads fonts named by path, and to
+# read-fonts and harfrust, whose float maths then need no libm.
+std = ["fontwich/std", "read-fonts/std", "harfrust/std"]
+
+# How the scripts whose breaks need more than rules are segmented, for lines
+# and for words alike, decided in `unicode/segmenters.rs` alone. On, ICU's
+# dictionaries do it, as ICU4C's do in Chrome: lines break by
+# the Southeast Asian ones in Thai, Lao, Khmer and Myanmar (1.77 MB), and
+# words are found by those and the Chinese and Japanese one (2.0 MB). Off, the
+# LSTM breaks lines and finds words in those four scripts (310.5 KB), and
+# Chinese and Japanese words follow UAX #29's own rules, an ideograph or a
+# hiragana a word of its own and a run of katakana one, ICU having no model
+# for them. Baked data is linked only where its constructor is called, so
+# either way the other's data drops out at link time, although the LSTM is
+# compiled in both (`icu_segmenter`'s `lstm` below).
+dictionaries = []
+
+# Runtime dependencies are limited to fontwich (and what it brings), parlance,
+# harfrust, read-fonts, icu_*, writeable and hashbrown. The versions of the font
+# crates are the workspace's.
+[dependencies]
+# The fonts a context sets text in. Only its core: no platform
+# font system, which is the host's to ask for by enabling fontwich's `system`
+# feature itself.
+fontwich = { version = "0.0.1", path = "../fontwich", default-features = false }
+
+# The value types the text stack shares -- weights, widths, slopes, OpenType
+# tags, feature and variation settings, languages, family names, the wrapping
+# keywords -- so that a caller's style needs no conversion at the boundary.
+# Already in the build through fontwich, at the same version.
+parlance = { version = "0.1.0", default-features = false }
+
+# The tables styles and their lists are interned through, which keep their
+# capacity when cleared. fontwich's version, with no default
+# features: no hasher seeded from a process-wide static, since the crate
+# supplies a fixed one.
+hashbrown = { version = "0.17", default-features = false }
+
+# The line and grapheme segmenters analysis runs over the text, and the word
+# segmenter word motion and `capitalize` run, with their data compiled in:
+# UAX #14 15.1 and UAX #29 17.0, with
+# the dictionaries or the LSTM for Thai, Lao, Khmer and Myanmar, and with
+# the dictionaries for Chinese and Japanese words, as `dictionaries` says.
+# The version is icu_properties's, which the Unicode tables are generated
+# from. Without default features: the compiled data, which holds the
+# dictionaries, and the LSTM, and not `std` or `auto`.
+icu_segmenter = { version = "2.3.0", default-features = false, features = ["compiled_data", "lstm"] }
+
+# The content locale a line segmenter is tailored for, which it reads only to
+# ask whether the language is Japanese or Chinese. Already in the build through
+# icu_segmenter.
+icu_locale_core = { version = "2.3.0", default-features = false }
+
+# A font held whole, one per font instance (`read_fonts::model::Font`): its
+# bytes at the instance's coordinates, the tables harfrust
+# shapes with, parsed once on it, and the metrics the font stage sets lines
+# by, the font's own with `MVAR` applied and `BASE` read; its glyphs'
+# advances with `HVAR` applied, and their bounds -- `glyf`'s boxes, an
+# outline's points at the coordinates, a charstring's -- where `OS/2` gives
+# no x-height, for an initial letter's ink, the probes
+# `text-spacing-trim` reads and the vertical origins; and
+# its character map. The raw tables too: `vmtx`, `VORG`, `GSUB`'s features
+# and lookups. The workspace's version, fontwich's and harfrust's. `libm` for
+# the float maths it needs without std.
+read-fonts = { workspace = true, features = ["libm"] }
+
+# The shaper, a port of HarfBuzz, which the shaping stage calls,
+# shaping in the read-fonts font each used font holds, and whose canonical
+# decomposition, composition and combining classes font coverage replays its
+# normalizer on (`unicode/normalize.rs`). The workspace's version, on
+# the read-fonts fontwich and winkin read. Without its default features, so
+# without std; `libm` for the float maths it needs then. Its own Unicode
+# tables, Unicode 18 at this release, not ICU's: the `icu` feature pins an
+# older icu_properties than the crate's.
+harfrust = { workspace = true, features = ["libm"] }
+
+# Full case mapping, with the language tailorings CSS asks for (Turkish and
+# Azerbaijani dotted and dotless i, Lithuanian dots, Greek accents dropped in
+# capitals, Dutch IJ) and the contexts (final sigma), for `text-transform`,
+# with its data compiled in. icu_properties's version, and no
+# `std`. The word segmenter capitalize finds words with is icu_segmenter's,
+# already here.
+icu_casemap = { version = "2.3.0", default-features = false, features = ["compiled_data"] }
+
+# The trait icu_casemap hands its mappings back as, which writes them into the
+# content's own text rather than a string of their own: ICU4X's, already in
+# the build through icu_locale_core at this version.
+writeable = { version = "0.6.4", default-features = false }
+
+[dev-dependencies]
+# ICU's own normalizers to NFD and NFC, with their data compiled in: the
+# oracle the tests hold harfrust's canonical decomposition, composition and
+# combining classes to, built up into whole forms, on which font coverage
+# replays harfrust's normalizer (`unicode/normalize.rs`).
+# icu_properties's version. Nothing at runtime reads it.
+icu_normalizer = { version = "2.3.0", default-features = false, features = ["compiled_data"] }
+
+# The Unicode tables are generated from icu_properties (support/unicode_gen) and
+# swept against it here, for every character, and the bidi conformance tests
+# take each character's class and paired bracket from it. Nothing at runtime
+# reads it: the runtime reads the crate's own generated tables.
+icu_properties = { version = "2.3.0", default-features = false, features = ["compiled_data"] }
+
+# The fonts built in memory that the unit tests and the integration tests set
+# text in, and the allocator that counts their allocations. A crate of its
+# own, depending on fontwich alone, so that both kinds of test reach it.
+testing = { path = "../../support/testing" }

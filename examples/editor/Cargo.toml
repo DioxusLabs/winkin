@@ -1,0 +1,15 @@
+[package]
+name = "winkin_editor"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+winkin = { path = "../../crates/winkin" }
+fontwich = { path = "../../crates/fontwich" }
+vello_cpu = "0.2"
+winit = "0.30"
+softbuffer = "0.4"
+arboard = { version = "3", default-features = false }
+png = "0.18"

@@ -1,0 +1,14 @@
+[package]
+name = "unicode_gen"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Generates winkin's packed Unicode property tables."
+
+# Both are the generator's alone: winkin reads the file this writes and links
+# neither. icu_properties is also winkin's dev-dependency, for the sweep test
+# that checks the file against it.
+[dependencies]
+icu_properties = { version = "2.3.0", default-features = false, features = ["compiled_data"] }
+packtab = "1.9.0"

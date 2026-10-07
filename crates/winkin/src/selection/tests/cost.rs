@@ -1,0 +1,168 @@
+//! Cost tests, in `crate::work` steps counted in debug builds. They pin:
+//! - each query linear in its line;
+//! - a word motion costing the distance it moves.
+
+use super::*;
+
+/// Each query costs linear steps in its line, and a word motion in its paragraph.
+///
+/// Twice the line takes at most about twice the steps. Steps are counted in
+/// debug builds only.
+#[cfg(debug_assertions)]
+#[test]
+fn a_query_costs_linear_line_length() {
+    use crate::work;
+    // Words of Latin, or of Latin and Hebrew, which left and right walk on
+    // the screen.
+    for word in ["ab ", "ab \u{5D0}\u{5D1} "] {
+        let steps = |words: usize| {
+            let text = word.repeat(words);
+            let layout = laid(&text, 1e6);
+            assert_eq!(layout.lines().len(), 1);
+            let len = layout.text().len();
+            let middle = snapped(&layout, Position::from(len / 2));
+            let _ = work::take();
+            let _ = layout.caret(middle.position);
+            let _ = hit(&layout, 30.0 * words as f32, 0);
+            let granularities = [
+                Granularity::Character,
+                Granularity::Word,
+                Granularity::Line,
+                Granularity::LineBoundary,
+            ];
+            for granularity in granularities {
+                for direction in [
+                    MotionDirection::Forward,
+                    MotionDirection::Left,
+                    MotionDirection::Right,
+                ] {
+                    let _ = moved(
+                        &layout,
+                        Selection::from(middle.position),
+                        direction.moving(granularity),
+                    );
+                }
+            }
+            // And the walk on the screen that text changing direction takes.
+            for right in [false, true] {
+                let _ = visual::character_on_screen(&layout, middle, right);
+                let _ = visual::word_on_screen(&layout, middle, right, WordMotion::SkipSpaces);
+            }
+            let _ = layout.selection_rects(0..len).count();
+            let _ = layout.selected_text(0..len, CopyKind::Clipboard).count();
+            work::take()
+        };
+        let (small, large) = (steps(300), steps(600));
+        assert!(small > 0);
+        assert!(
+            large <= small * 5 / 2,
+            "{word:?}: {small} steps, then {large}"
+        );
+    }
+}
+
+/// A word motion costs the distance it moves, however long the paragraph or word.
+///
+/// - Across a long word, from its start, middle and end each way, and over
+///   base64 end to end, twice the text takes at most about twice the steps.
+/// - A spaceless Thai or ideograph run costs a motion one segmenting of the
+///   run, in text order and on screen, never one per stop.
+/// - Walking Thai and Japanese of short runs end to end costs its length.
+///
+/// Steps are counted in debug builds only.
+#[cfg(debug_assertions)]
+#[test]
+fn a_word_motion_costs_the_distance_it_moves() {
+    use crate::work;
+    let directions = [
+        MotionDirection::Forward,
+        MotionDirection::Backward,
+        MotionDirection::Left,
+        MotionDirection::Right,
+    ];
+    let broken = styled(|style| style.text.word_break = WordBreak::BreakAll);
+    let laid_broken = |text: &str| {
+        laid_with(&ComputedBlockStyle::new(&broken), 400.0, |b| {
+            b.text(NodeKey(1), text)
+        })
+    };
+    // Every word motion from `text`'s start, its middle and its end, and
+    // the walk on the screen that text changing direction takes.
+    let across = |text: &str| {
+        let layout = laid_broken(text);
+        let len = layout.text().len();
+        let _ = work::take();
+        for from in [0, len / 2, len] {
+            let from = snapped(&layout, Position::from(from));
+            for direction in directions {
+                for stops in [WordMotion::SkipSpaces, WordMotion::StopAtWordEnd] {
+                    let motion = direction.moving(Granularity::Word).with_word_motion(stops);
+                    let _ = moved(&layout, Selection::from(from.position), motion);
+                }
+            }
+            for right in [false, true] {
+                let _ = visual::word_on_screen(&layout, from, right, WordMotion::SkipSpaces);
+            }
+        }
+        work::take()
+    };
+    // One word of `letters` letters, crossed whole or half.
+    let letters = |letters: usize| {
+        let text: String = (0..letters)
+            .map(|at| char::from(b'a' + (at % 26) as u8))
+            .collect();
+        across(&text)
+    };
+    let (small, large) = (letters(10_000), letters(20_000));
+    assert!(small > 0);
+    assert!(large <= small * 5 / 2, "{small} steps, then {large}");
+    // "Thai" and "Chinese characters" with nothing between them, and Tai
+    // Tham. ICU hands Tai Tham to its dictionaries and LSTM, and neither
+    // has it, so a run is one word however long. A motion crosses it a stop
+    // at a time.
+    for word in [
+        "\u{E44}\u{E17}\u{E22}",
+        "\u{6F22}\u{5B57}",
+        "\u{1A20}\u{1A21}",
+    ] {
+        let (small, large) = (across(&word.repeat(100)), across(&word.repeat(200)));
+        assert!(small > 0);
+        assert!(
+            large <= small * 5 / 2,
+            "{word}: {small} steps, then {large}"
+        );
+    }
+    // A run of base64, its `+` and `/` and `=` words of their own, and Thai
+    // and Japanese of short runs between spaces and marks of punctuation,
+    // walked by words end to end, each way.
+    let walked = |text: &str, copies: usize| {
+        let layout = laid_broken(&text.repeat(copies));
+        let len = layout.text().len();
+        let _ = work::take();
+        for direction in directions {
+            let from = match direction {
+                MotionDirection::Forward | MotionDirection::Right => 0,
+                MotionDirection::Backward | MotionDirection::Left => len,
+            };
+            let stops = walk(&layout, from, direction.moving(Granularity::Word));
+            assert!(stops.len() > copies, "{direction:?}: {} stops", stops.len());
+        }
+        work::take()
+    };
+    // The Thai sentence's first clause, which ends in a space.
+    // Fewer copies of the Thai and the Japanese without dictionaries: the
+    // LSTM, slow in a debug build, segments their runs at each motion.
+    let clause = THAI.split_inclusive(' ').next().unwrap_or(THAI);
+    for (text, copies) in [
+        ("TWFuIGlz+ZGlzdGluZ3Vp/c2hlZA==", 300),
+        (clause, 10),
+        (JAPANESE, 10),
+    ] {
+        let (small, large) = (walked(text, copies), walked(text, 2 * copies));
+        assert!(small > 0);
+        assert!(
+            large <= small * 5 / 2,
+            "{text}: {small} steps, then {large}"
+        );
+    }
+}

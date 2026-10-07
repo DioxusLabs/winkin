@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "examples/editor", "support/*"]
+
+# The font crates are pinned here, once, so that fontwich, winkin and
+# harfrust read fonts with the same read-fonts. harfrust is at its 0.14.0
+# release (2026-10-03), which is built on read-fonts 0.45 and its owned font,
+# `read_fonts::model::Font`; fontwich follows rather than pulling a second
+# copy.
+[workspace.package]
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dfrg/winkin"
+
+[workspace.dependencies]
+read-fonts = { version = "0.45.0", default-features = false }
+harfrust = { version = "0.14.0", default-features = false }
+
+# One codegen unit, so that timings compare code rather than where the
+# compiler happened to place it: with the default sixteen, an edit that adds
+# no work can move a benchmark by a few percent. This applies to builds in
+# this workspace only; a crate depending on winkin uses its own profile.
+[profile.release]
+codegen-units = 1
+
+# The release build with line tables, for a sampling profiler to name what it
+# samples: the same code as `release`, kept apart in `target/profiling` so
+# that profiling rebuilds nothing a release build uses.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"

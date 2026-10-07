@@ -1,0 +1,148 @@
+name: CI
+
+# Every job runs on pushes and pull requests in the public repository. In a
+# private copy, where runs cost credits, jobs run only when started by hand.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    if: github.repository == 'dfrg/winkin' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  test:
+    if: github.repository == 'dfrg/winkin' || github.event_name == 'workflow_dispatch'
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # fontwich links libfontconfig by default, so the build needs its
+      # development files. The fonts matter as much: with none installed,
+      # every fontconfig query returns the same answer and the Linux tests
+      # skip nearly everything they exist to check.
+      - name: Install fontconfig and a representative font set
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+
+      - name: Test (unit, integration, doctests)
+        run: cargo test --workspace
+
+      - name: Test in release
+        run: cargo test --workspace --release
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy in release
+        run: cargo clippy --workspace --all-targets --release -- -D warnings
+
+      - name: Clippy winkin with std and without dictionaries
+        run: cargo clippy -p winkin --no-default-features --features std --all-targets -- -D warnings
+
+      # Without `system` or `std`, fontwich holds fonts as bytes and answers
+      # fallback from the shipped tables, which is what a wasm or embedded
+      # consumer gets. Running it on every host catches a backend's `std`
+      # leaking into the core through a path only that host compiles.
+      - name: Test fontwich without default features
+        run: cargo test -p fontwich --no-default-features
+
+      # Font files mapped rather than read.
+      - name: Test fontwich with mmap
+        run: cargo test -p fontwich --features mmap
+
+      - name: Test fontwich with std and without system
+        run: cargo test -p fontwich --no-default-features --features std
+
+      # The Android config parser is ordinary code over a file's bytes and is
+      # not gated on the target, so every host runs it against the checked-in
+      # AOSP fixtures. It is the one backend test that asserts exact answers
+      # rather than skipping what is not installed.
+      - name: Test fontwich's Android backend
+        run: cargo test -p fontwich --features android
+
+      # Clippy runs over each combination as well, since test-only helpers
+      # shared between features are easy to leave dead in one and not another.
+      - name: Clippy fontwich with every feature
+        run: cargo clippy -p fontwich --all-targets --all-features -- -D warnings
+
+      - name: Clippy fontwich without default features
+        run: cargo clippy -p fontwich --all-targets --no-default-features -- -D warnings
+
+      - name: Clippy fontwich with std and without system
+        run: cargo clippy -p fontwich --all-targets --no-default-features --features std -- -D warnings
+
+  # Both crates claim to be no_std without their default features. Every host
+  # above has std, so a stray `use std::` compiles there and fails only for
+  # the consumers it matters to. These targets have no std to fall back on.
+  no-std:
+    if: github.repository == 'dfrg/winkin' || github.event_name == 'workflow_dispatch'
+    name: no_std (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [thumbv7em-none-eabihf, wasm32-unknown-unknown]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build fontwich
+        run: cargo build -p fontwich --target ${{ matrix.target }} --no-default-features
+
+      - name: Build winkin
+        run: cargo build -p winkin --target ${{ matrix.target }} --no-default-features
+
+  # Lints differ between releases, so this job checks only that the crates
+  # build with the oldest supported compiler.
+  msrv:
+    if: github.repository == 'dfrg/winkin' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p winkin -p fontwich
+
+  doc:
+    if: github.repository == 'dfrg/winkin' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc -p winkin -p fontwich --all-features --no-deps
+      - run: cargo doc -p winkin -p fontwich --all-features --no-deps --document-private-items

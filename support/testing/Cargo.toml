@@ -1,0 +1,13 @@
+[package]
+name = "testing"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Fonts built in memory and an allocation counter, shared by winkin's unit and integration tests."
+
+[dependencies]
+# Only fontwich, never winkin: winkin's unit tests depend on this crate, so
+# it cannot depend on winkin in turn. No default features, so that it adds
+# nothing to the features winkin's own tests build fontwich with.
+fontwich = { path = "../../crates/fontwich", default-features = false }

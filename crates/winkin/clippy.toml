@@ -1,0 +1,4 @@
+# The most segments a path may have in code before it is imported: `a::b`,
+# as `mem::swap` or `fmt::Formatter`, and no more.
+# `#![warn(clippy::absolute_paths)]` in `lib.rs` turns the lint on.
+absolute-paths-max-segments = 2

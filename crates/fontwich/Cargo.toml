@@ -1,0 +1,147 @@
+[package]
+name = "fontwich"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Font enumeration, CSS font matching and platform font fallback."
+keywords = ["font", "fallback", "css", "fontconfig", "directwrite"]
+categories = ["text-processing", "os", "no-std"]
+
+[lints.clippy]
+# A module with children is `foo/mod.rs`, never `foo.rs` beside `foo/`.
+self_named_module_files = "deny"
+
+[features]
+default = ["system"]
+
+# The platform's font APIs: DirectWrite on Windows, fontconfig on Linux and the
+# BSDs, Core Text on Apple platforms. `Layer::system`, `Collection::system` and
+# `Backend::platform` need it. It is the only thing that links a native
+# library.
+#
+# Off, the crate still holds fonts given as bytes or read from files. It has
+# no system layer: nothing lists the platform's fonts or reads fontconfig's
+# configuration. A caller scans a directory it names, or supplies bytes, and
+# supplies fallback with a `FallbackOverride`.
+#
+# A feature may only add capability, since features unify across a build.
+# `system` does: every crate in the graph can live with it switched on by
+# someone else. fontconfig-sys's `dlopen` does not, which is why build.rs
+# reads an environment variable for it instead.
+system = [
+    "std",
+    "dep:objc2-core-foundation",
+    "dep:objc2-core-text",
+    "dep:fontconfig-sys",
+    "dep:windows",
+    "dep:windows-core",
+]
+
+# Files: fonts named by path and read on demand. Needs nothing from the
+# platform. Off, the crate is no_std with alloc and holds fonts as bytes, for
+# wasm and embedded.
+std = ["read-fonts/std"]
+
+# Font files mapped into memory rather than read, when their bytes are asked
+# for with `Font::load`. Either way a file's bytes are shared by every font
+# naming it, in every collection, for as long as anyone holds them.
+mmap = ["std", "dep:memmap2"]
+
+# The Android backend. Off by default, so nobody who is not targeting Android
+# pays for roxmltree.
+#
+# A feature, not `cfg(target_os = "android")`: the config parser is ordinary
+# code over a file's bytes, and gating it on the target would mean it could
+# only be compiled, and so only tested, on a device. The Windows tables
+# compile in every host's tests for the same reason.
+android = ["std", "dep:roxmltree"]
+
+[dependencies]
+parlance = { version = "0.1.0", default-features = false }
+
+# Hash maps for the tables nothing reads in order: the distinct charsets
+# and files a layer shares, what heap accounting has counted. No default
+# features, so no dependencies of its own and no hasher seeded from a
+# process-wide static: `src/hash.rs` supplies a fixed one.
+hashbrown = { version = "0.17", default-features = false }
+
+# Reading fonts: names, attributes, charmaps.
+#
+# No default features, so that the crate builds without std. Without std it
+# needs `libm` for float maths in tables we never read; `std` switches
+# read-fonts to its own std build rather than leaving libm doing that work.
+read-fonts = { workspace = true, features = ["libm"] }
+
+# The lock and one-time cell for builds without std (`src/sync.rs`). With std
+# the crate uses `Mutex` and `OnceLock`, so a thread waiting for a family's
+# fonts or a file's bytes sleeps; without std there is nothing to sleep on.
+# The fallback cache spins in every build: its lookups are a hash probe.
+spin = { version = "0.12.3", default-features = false, features = ["once", "mutex", "spin_mutex"] }
+
+# Mapping font files, with the `mmap` feature.
+memmap2 = { version = "0.9.11", optional = true }
+
+# Android's fonts.xml. A read-only tree is the right shape for a config file
+# read once at startup, and it costs one transitive dependency (memchr).
+roxmltree = { version = "0.21.1", optional = true }
+
+# DirectWrite, for the Windows system layer: every family name listed up front,
+# a family's files asked for when its fonts are wanted. Fallback on Windows is
+# static tables, and `MapCharacters` for a character they and the recorded
+# table leave unanswered.
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", optional = true, features = ["Win32_Graphics_DirectWrite", "Win32_Foundation"] }
+# What `#[implement]` expands to: the text source `MapCharacters` reads.
+windows-core = { version = "0.62.2", optional = true }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["alloc", "CFString", "CFArray", "CFBase", "CFDictionary", "CFNumber", "CFSet", "CFURL"], optional = true }
+objc2-core-text = { version = "0.3.2", default-features = false, features = ["alloc", "CTFont", "CTFontDescriptor", "CTFontCollection"], optional = true }
+
+# Linux and BSD. Its `dlopen` feature is deliberately never named here: a
+# feature unifies across the whole build, so enabling it would force runtime
+# loading on every other crate in the graph, breaking any that link against
+# fontconfig. `RUST_FONTCONFIG_DLOPEN` selects the mode instead — see build.rs.
+# Android is `unix` and has no fontconfig: its fonts are files on disk, and
+# `fonts.xml` arranges them. `roxmltree` is what reads that, so there it is a
+# dependency of `system` rather than of the `android` feature.
+[target.'cfg(target_os = "android")'.dependencies]
+roxmltree = { version = "0.21.1" }
+
+[target.'cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))'.dependencies]
+fontconfig-sys = { package = "yeslogic-fontconfig-sys", version = "6.0.1", optional = true }
+
+# Both print, both time themselves, and both ask for `platform()` — none of
+# which exists without `std`. Cargo skips them rather than failing the build.
+[[example]]
+name = "bench"
+required-features = ["system"]
+
+[[example]]
+name = "dump"
+required-features = ["system"]
+
+[dev-dependencies]
+icu_properties = "2.3.0"
+
+[target."cfg(windows)".dev-dependencies]
+windows = { version = "0.62.2", features = ["Win32_Graphics_DirectWrite", "Win32_Foundation"] }
+
+# The library already depends on this for the backend, but an integration
+# test links only against the public API plus dev-dependencies, and
+# tests/fontconfig.rs needs to ask fontconfig questions the public API does
+# not expose — such as whether a family is actually monospaced.
+[target.'cfg(all(unix, not(target_vendor = "apple")))'.dev-dependencies]
+fontconfig-sys = { package = "yeslogic-fontconfig-sys", version = "6.0.1" }
+
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+# Adds glyph-coverage lookups on top of the library's own feature set, for
+# tests/coretext.rs only.
+objc2-core-text = { version = "0.3.2", default-features = false, features = ["objc2-core-graphics"] }
+
+# What a cold miss loads and keeps, on the system's fonts.
+[[example]]
+name = "miss"
+required-features = ["system"]

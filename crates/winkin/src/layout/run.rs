@@ -1,0 +1,949 @@
+//! Text runs: a text item read back with its font, its glyphs and its
+//! clusters.
+//!
+//! **A run's font is its shaping run's.** A text item holds clusters of one
+//! used font, and names the shaping run of its first shaped cluster, whose
+//! font that is. The used font holds what a renderer draws with: the font's
+//! shared bytes, its index, its coordinates and its synthesis. Font
+//! selection copies these from the context's instance. So a layout is read
+//! without the context, and [`TextRun::font`] borrows the layout alone.
+//!
+//! **Glyphs are decoded on the fly** by `fragments::GlyphWalk`. It yields the
+//! paragraph's glyphs, and the line's own at its reshaped edges, in drawing
+//! order and placed exactly. This file converts them to pixels. Nothing is
+//! allocated and nothing restarts.
+
+use core::fmt;
+use core::ops::Range;
+use core::slice::Iter;
+
+use fontwich::{FontBytes, FontKey};
+
+use crate::data::{Id, index_to_u32};
+use crate::stages::analysis::{
+    BidiLevel, ClusterClass, ClusterId, Clusters as ClusterTable, RunOrientation, ScriptRun,
+    ScriptRunId,
+};
+use crate::stages::content::{ContentFlags, NodeKey};
+use crate::stages::fonts::{Generated, LineBaseline, NormalizedCoord, UsedFont, UsedFontId};
+use crate::stages::fragments::{
+    ClusterWalk, ExactGlyph, FragmentItem, FragmentItemFlags, GlyphWalk,
+};
+use crate::stages::measure::{Extent, ShapedGenerated};
+use crate::stages::shape::{ClusterGlyphs, GlyphStore, ShapedRun, ShapedText, SidecarGlyph};
+use crate::style::WritingMode;
+use crate::unit::{self, InlineLayoutUnit, LayoutUnit};
+
+use super::emphasis::{EmphasisMark, EmphasisMarks};
+use super::{CrossExtents, Line};
+use crate::data::IdRange;
+use crate::stages::lines::InlineExtents;
+use crate::work;
+
+/// Shaped or generated text from one node, font and bidi level on a line.
+#[derive(Copy, Clone)]
+pub struct TextRun<'a> {
+    line: Line<'a>,
+    item: &'a FragmentItem,
+}
+
+impl<'a> TextRun<'a> {
+    /// Returns the node key used for styling.
+    ///
+    /// Hyphens use the preceding text node; ellipses use the block key.
+    pub fn key(&self) -> NodeKey {
+        self.line.layout().content().nodes.key(self.item.node)
+    }
+
+    /// Returns the logical byte range in [`Layout::text`](crate::Layout::text).
+    ///
+    /// Generated text has an empty range at its insertion position.
+    pub fn text_range(&self) -> Range<usize> {
+        let clusters = self.item.clusters();
+        let ends = &self.line.layout().analysis().clusters;
+        ends.start(clusters.start).get()..ends.start(clusters.end).get()
+    }
+
+    /// Returns the font and size used to draw the run.
+    ///
+    /// Returns `None` if no font is available, such as with an empty collection
+    /// or unavailable font bytes. Clusters retain their positions but draw nothing.
+    ///
+    /// Borrows font bytes and coordinates from the layout. Does not allocate
+    /// or require a context.
+    pub fn font(&self) -> Option<FontInstance<'a>> {
+        let used = self.used()?;
+        let drawn = used.instance.as_ref()?;
+        Some(FontInstance {
+            bytes: &drawn.bytes,
+            index: drawn.index,
+            size: used.glyph_size().to_px(),
+            coords: &drawn.coords,
+            embolden: drawn.embolden,
+            skew: drawn.skew,
+        })
+    }
+
+    /// Returns the run advance in pixels, including reshaped line edges.
+    ///
+    /// In a ruby base or annotation, the advance includes the room that
+    /// `ruby-align` distributes beside the run's text.
+    pub fn advance(&self) -> f32 {
+        self.item.advance().to_px()
+    }
+
+    /// Returns inline extents relative to line-box left.
+    ///
+    /// In a ruby base or annotation, the extents include the room that
+    /// `ruby-align` distributes beside the run's text, as do the extents of
+    /// the clusters beside that room. Glyph positions exclude it.
+    pub fn inline(&self) -> InlineExtents {
+        let left = self.item.inline;
+        InlineExtents {
+            left: left.to_px(),
+            right: (left + self.item.advance()).to_px(),
+        }
+    }
+
+    /// Returns text extents across the line, relative to the line-over edge.
+    ///
+    /// Uses font ascent and descent around the baseline. These extents also
+    /// contribute to rectangles of culled boxes, matching Chrome.
+    pub fn block(&self) -> CrossExtents {
+        let (over, under) = self.block_extent();
+        CrossExtents {
+            over: over.to_px(),
+            under: under.to_px(),
+        }
+    }
+
+    /// Returns the baseline offset from line-box top.
+    ///
+    /// Includes accumulated `vertical-align` shifts from enclosing boxes.
+    pub fn baseline(&self) -> f32 {
+        self.item.block.to_px()
+    }
+
+    /// Returns glyphs in drawing order, positioned relative to line-box left and top.
+    ///
+    /// Includes reshaped edge glyphs. Cloning the iterator preserves its
+    /// current position without copying glyph data.
+    #[inline]
+    pub fn glyphs(&self) -> impl Iterator<Item = Glyph> + Clone + use<'a> {
+        RunGlyphs::new(self)
+    }
+
+    /// Returns clusters in logical order with their text ranges and positions.
+    ///
+    /// Used for caret positioning, selection and decorations. Generated text
+    /// has no clusters. Cloning copies only the iterator state.
+    pub fn clusters(&self) -> impl ExactSizeIterator<Item = Cluster> + Clone + use<'a> {
+        RunClusters::new(self)
+    }
+
+    /// Returns emphasis marks in logical cluster order.
+    ///
+    /// Returns no marks for generated text or styles without emphasis.
+    /// Does not allocate.
+    pub fn emphasis_marks(&self) -> impl Iterator<Item = EmphasisMark> + use<'a> {
+        EmphasisMarks::new(self)
+    }
+
+    /// Returns the bidi level: even for LTR, odd for RTL.
+    pub fn level(&self) -> BidiLevel {
+        self.item.level
+    }
+
+    /// Returns `true` if the run is RTL. Glyphs are drawn from the logical end.
+    pub fn is_rtl(&self) -> bool {
+        self.item.level.is_rtl()
+    }
+
+    /// Returns the glyph orientation within the line.
+    ///
+    /// Glyphs may be horizontal, upright, sideways or combined into one
+    /// upright em. Positions always use the line frame: along the line from
+    /// its left and across it from its top. For vertical lines, these axes
+    /// map to the page top and right.
+    ///
+    /// The painter maps the frame to the page and rotates sideways glyphs
+    /// with the line. Upright and combined glyphs remain upright. Hyphens
+    /// and ellipses inherit the orientation of the preceding text.
+    pub fn orientation(&self) -> RunOrientation {
+        let layout = self.line.layout();
+        if layout.content().block.writing_mode == WritingMode::HorizontalTb {
+            return RunOrientation::Horizontal;
+        }
+        if let Some(generated) = self.shaped_generated() {
+            return generated.orientation;
+        }
+        self.script_run()
+            .map_or(RunOrientation::Horizontal, |(_, run)| run.orientation)
+    }
+
+    /// Returns the scale across the line for combined text.
+    ///
+    /// Narrows combined text to one em when narrower font forms are insufficient.
+    /// Scale each glyph about its supplied position; positions are already
+    /// scaled, matching Chrome.
+    /// Returns `1.0` for other runs.
+    pub fn combine_scale(&self) -> f32 {
+        if self.orientation() != RunOrientation::Combined {
+            return 1.0;
+        }
+        let layout = self.line.layout();
+        let shaped = layout.shaped().text(self.line.variant());
+        self.script_run()
+            .map_or(1.0, |(unit, _)| shaped.combine_fit(unit).scale())
+    }
+
+    /// Returns `true` if this run represents a tab.
+    ///
+    /// A tab is one cluster with no glyphs. Its advance is the distance to
+    /// the next tab stop.
+    pub fn is_tab(&self) -> bool {
+        self.item.flags.contains(FragmentItemFlags::TAB)
+    }
+
+    /// Returns `true` for preserved whitespace hanging past the line end.
+    ///
+    /// Enclosing boxes cover it, but browsers do not report it as ink.
+    pub fn is_hanging(&self) -> bool {
+        self.item.flags.contains(FragmentItemFlags::HANGS)
+    }
+
+    /// Returns `true` for laid-out text hidden by an ellipsis.
+    pub fn is_hidden(&self) -> bool {
+        self.item.flags.contains(FragmentItemFlags::HIDDEN)
+    }
+
+    /// Returns the generated text kind, or `None` for source text.
+    pub fn generated(&self) -> Option<Generated> {
+        self.shaped_generated().map(|text| text.kind)
+    }
+}
+
+// What the other views and the paths read of a run.
+impl<'a> TextRun<'a> {
+    /// The run text item `item` of `line` is.
+    #[inline]
+    pub(super) fn new(line: Line<'a>, item: &'a FragmentItem) -> Self {
+        Self { line, item }
+    }
+
+    /// Its line.
+    #[inline]
+    pub(super) fn line(&self) -> Line<'a> {
+        self.line
+    }
+
+    /// Its item.
+    #[inline]
+    pub(super) fn item(&self) -> &'a FragmentItem {
+        self.item
+    }
+
+    /// The generated text a generated run draws.
+    fn shaped_generated(&self) -> Option<&'a ShapedGenerated> {
+        let at = self.item.generated()?;
+        self.line.layout().measured().generated().get(at)
+    }
+
+    /// Returns the shaping run it is drawn in, as its item names it.
+    ///
+    /// The block's first line is set in its own shaping, where it has one.
+    /// An annotation's text names none, so its run is sought: the one
+    /// holding its first shaped cluster.
+    fn shaped_run(&self) -> Option<&'a ShapedRun> {
+        let layout = self.line.layout();
+        let runs = &layout.shaped().text(self.line.variant()).runs;
+        if let Some(run) = self.item.run() {
+            return runs.get(run);
+        }
+        let clusters = self.item.clusters();
+        let attrs = &layout.analysis().clusters;
+        // A cluster no glyph draws goes with the text around it and names no
+        // font of its own: the first that is shaped does.
+        let first = clusters
+            .clone()
+            .ids()
+            .find(|&cluster| attrs.class(cluster).is_some_and(ClusterClass::is_shaped))
+            .unwrap_or(clusters.start);
+        runs.run_containing(first)
+    }
+
+    /// Returns the analysis run it lies in: its shaping run's.
+    ///
+    /// A shaping run never crosses an analysis run. The first line's shaping
+    /// runs name the same analysis runs as the ordinary ones.
+    fn script_run(&self) -> Option<(ScriptRunId, &'a ScriptRun)> {
+        let id = self.shaped_run()?.script_run;
+        let runs = &self.line.layout().analysis().runs;
+        runs.get(id).map(|run| (id, run))
+    }
+
+    /// Its used font, where one draws it.
+    fn used(&self) -> Option<&'a UsedFont> {
+        let id = self.used_id()?;
+        self.line.layout().fonts().used.get(id)
+    }
+
+    /// Its used font's id: its shaping run's font, or for generated text
+    /// the font chosen for it.
+    fn used_id(&self) -> Option<UsedFontId> {
+        if let Some(generated) = self.shaped_generated() {
+            return Some(generated.font);
+        }
+        self.shaped_run().map(|run| run.font)
+    }
+
+    /// The same, on layout's grid.
+    pub(super) fn block_extent(&self) -> (LayoutUnit, LayoutUnit) {
+        let extent = self.used().map_or(Extent::NONE, |used| {
+            let metrics = &used.metrics;
+            Extent::new(metrics.ascent, metrics.descent)
+        });
+        extent.around(self.item.block)
+    }
+
+    /// Returns where its glyphs' baseline is from the line box's top.
+    ///
+    /// It is its box's baseline less a synthesized raise. Sideways text in a
+    /// line on its central baseline sits on the font's alphabetic baseline,
+    /// under the central one. Upright and combined glyphs are placed about the
+    /// line's own baseline. Only a line on its central baseline has the two
+    /// apart.
+    fn glyph_baseline(&self) -> LayoutUnit {
+        // A used font draws off its run's baseline only where a style sets
+        // `font-variant-position`, which it may synthesize, or the line's
+        // baseline is the central one, which its alphabetic one stands
+        // under: elsewhere no font is looked for.
+        let content = self.line.layout().content();
+        if !content.flags.contains(ContentFlags::VARIANT_POSITION)
+            && LineBaseline::from_content(content) == LineBaseline::Alphabetic
+            && work::fast_paths()
+        {
+            return self.item.block;
+        }
+        let raise = self.used().map_or(LayoutUnit::ZERO, |used| {
+            let alphabetic = used.metrics.alphabetic;
+            let standing = alphabetic != LayoutUnit::ZERO
+                && matches!(
+                    self.orientation(),
+                    RunOrientation::Upright | RunOrientation::Combined
+                );
+            let under = if standing {
+                LayoutUnit::ZERO
+            } else {
+                alphabetic
+            };
+            used.synthesis.raise() - under
+        });
+        self.item.block - raise
+    }
+
+    /// Its clusters in logical order, where each stands along the line and
+    /// how far it reaches: what [`clusters`](Self::clusters) reads.
+    #[inline]
+    pub(super) fn cluster_walk(&self) -> ClusterWalk<'a> {
+        self.line.cluster_walk(self.item)
+    }
+
+    /// Returns its clusters as carets and marks see them, in logical order.
+    ///
+    /// A cluster's place is its own extent, or its even share of the ligature
+    /// it is drawn in, as Blink divides a ligature among its graphemes. Its
+    /// emphasis marks and the selection's carets read these.
+    pub(crate) fn places(&self) -> Places<'a> {
+        let layout = self.line.layout();
+        Places {
+            walk: self.cluster_walk(),
+            shaped: layout.shaped().text(self.line.variant()),
+            end: self.item.clusters().end,
+            rtl: self.item.level.is_rtl(),
+            ligature: None,
+        }
+    }
+
+    /// Whether it is combined text, set across its line in one em
+    /// (`text-combine-upright`).
+    #[inline]
+    pub(crate) fn is_combined(&self) -> bool {
+        self.orientation() == RunOrientation::Combined
+    }
+
+    /// Returns a combined run's clusters where carets and selections see them.
+    ///
+    /// They come in logical order, each with where it starts and ends across
+    /// the line from the line box's top. `None` for a run that is not
+    /// combined.
+    ///
+    /// A combined unit's text is horizontal text set across its em, from the
+    /// line's under side toward its over side as it reads. Chrome 153 places a
+    /// caret in it as in the horizontal text its `LayoutTextCombine` holds, at
+    /// the pen between two clusters. Such a caret runs along the line over the
+    /// em, while the rest of a line's carets run across it.
+    ///
+    /// - A cluster starts where its first glyph is drawn; a base glyph stands
+    ///   at its pen.
+    /// - A ligature's clusters, and any that draw nothing, share the span to
+    ///   the next evenly, as a caret divides a ligature along a line.
+    /// - The unit ends where it starts, mirrored about its middle. Its text is
+    ///   centred there, between its font's text-over and text-under baselines.
+    ///
+    /// A line never breaks inside a unit, whose glyphs are the paragraph's.
+    pub(crate) fn across_places(&self) -> Option<AcrossPlaces<'a>> {
+        if !self.is_combined() {
+            return None;
+        }
+        let layout = self.line.layout();
+        let analysis = layout.analysis();
+        let clusters = self.item.clusters();
+        let (unit, run) = self.script_run()?;
+        let unit_start = run.start;
+        let unit_end = analysis
+            .runs
+            .next_start(unit)
+            .unwrap_or(analysis.clusters.end_id());
+        let baseline = self.glyph_baseline().to_px();
+        let shaped = layout.shaped().text(self.line.variant());
+        let middle = baseline - shaped.combine_fit(unit).middle.to_px();
+        let mut places = AcrossPlaces {
+            glyphs: &shaped.glyphs,
+            baseline,
+            next: clusters.start,
+            end: clusters.end.min(unit_end),
+            unit_end,
+            from: (unit_start, middle),
+            to: (unit_end, middle),
+            last: middle,
+        };
+        let first = places.drawn(unit_start).unwrap_or(middle);
+        places.last = 2.0 * middle - first;
+        places.from = (unit_start, first);
+        // The last cluster with glyphs at or before the run's start, which
+        // is the unit's start but where a style boundary divides the unit.
+        let mut at = clusters.start;
+        while at > unit_start {
+            work::step();
+            if let Some(there) = places.drawn(at) {
+                places.from = (at, there);
+                break;
+            }
+            at = ClusterId::new(at.get() - 1);
+        }
+        places.to = places.next_drawn(places.from.0);
+        Some(places)
+    }
+
+    /// How wide a space is in its font, exactly.
+    ///
+    /// The selection marks a line's end this wide, as Blink draws it one space
+    /// of the font of the fragment ending the line.
+    pub(crate) fn space_width(&self) -> InlineLayoutUnit {
+        let layout = self.line.layout();
+        let content = layout.content();
+        let text = content
+            .nodes
+            .text_facts(self.item.node, self.line.variant());
+        layout
+            .fonts()
+            .primary_font(content.facts.text_request(text))
+            .map_or(InlineLayoutUnit::ZERO, |used| {
+                InlineLayoutUnit::from_text(used.metrics.space)
+            })
+    }
+}
+
+/// A text run's clusters where a caret and a mark see them, in logical
+/// order: returned by [`TextRun::places`].
+///
+/// A cluster's extent is its own, where it draws glyphs of its own; a
+/// ligature's advance, all on the cluster that starts it, is shared evenly
+/// among the clusters it draws (it and the continuations after it), each
+/// share counted from the ligature's logical start, as Blink divides a
+/// ligature among its graphemes (`AddEmphasisMarkToBloberizer`, and
+/// `ShapeResult::CaretPositionForOffset` for carets).
+pub(crate) struct Places<'a> {
+    walk: ClusterWalk<'a>,
+    /// The run's shaping, whose glyph words say which clusters continue a
+    /// ligature.
+    shaped: &'a ShapedText,
+    /// The run's last cluster boundary, which a ligature's clusters end at
+    /// the latest.
+    end: ClusterId,
+    rtl: bool,
+    /// The ligature being shared out: its start and end along the line, how
+    /// many clusters it draws, and how many of them were handed out.
+    ligature: Option<(InlineLayoutUnit, InlineLayoutUnit, usize, usize)>,
+}
+
+impl Places<'_> {
+    /// How many clusters from `cluster` a ligature starting there draws: it
+    /// and the continuations after it in the run.
+    fn drawn_by(&self, cluster: ClusterId) -> usize {
+        let mut count = 1;
+        let mut next = cluster.get() + 1;
+        while next < self.end.get()
+            && self
+                .shaped
+                .glyphs
+                .word(ClusterId::new(next))
+                .is_continuation()
+        {
+            work::step();
+            count += 1;
+            next += 1;
+        }
+        count
+    }
+}
+
+impl Iterator for Places<'_> {
+    /// A cluster, and where it starts and ends along the line, from the line
+    /// box's left, exactly.
+    type Item = (ClusterId, InlineLayoutUnit, InlineLayoutUnit);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        work::step();
+        let (cluster, left, step) = self.walk.next()?;
+        let (from, to) = match self.ligature {
+            Some((start, end, count, done)) if done < count && step == InlineLayoutUnit::ZERO => {
+                self.ligature = Some((start, end, count, done + 1));
+                share(start, end, count, done, self.rtl)
+            }
+            _ => {
+                let count = self.drawn_by(cluster);
+                if count > 1 {
+                    self.ligature = Some((left, left + step, count, 1));
+                    share(left, left + step, count, 0, self.rtl)
+                } else {
+                    self.ligature = None;
+                    (left, left + step)
+                }
+            }
+        };
+        Some((cluster, from, to))
+    }
+}
+
+/// The `k`th of `count` even shares of `start..end`, counted from the
+/// logical start: its left and right, right to left from `end`.
+fn share(
+    start: InlineLayoutUnit,
+    end: InlineLayoutUnit,
+    count: usize,
+    k: usize,
+    rtl: bool,
+) -> (InlineLayoutUnit, InlineLayoutUnit) {
+    let whole = i128::from((end - start).raw());
+    let count = i128::from(index_to_u32(count.max(1)));
+    // Exactly on the grid: the n-th boundary of the shares.
+    let at = |n: usize| {
+        let raw = whole * i128::from(index_to_u32(n)) / count;
+        InlineLayoutUnit::from_raw(i64::try_from(raw).unwrap_or_default())
+    };
+    if rtl {
+        (end - at(k + 1), end - at(k))
+    } else {
+        (start + at(k), start + at(k + 1))
+    }
+}
+
+/// A combined run's clusters where a caret and a selection see them across
+/// its line, in logical order: returned by [`TextRun::across_places`].
+pub(crate) struct AcrossPlaces<'a> {
+    /// The paragraph's glyphs, which a unit's are: no line breaks inside one.
+    glyphs: &'a GlyphStore,
+    /// The line's baseline, from the line box's top, which the unit's
+    /// glyphs are placed about.
+    baseline: f32,
+    /// The run's next cluster, and where its clusters in the unit end.
+    next: ClusterId,
+    end: ClusterId,
+    /// Where the unit ends.
+    unit_end: ClusterId,
+    /// The boundary the clusters from `next` are counted from: a cluster
+    /// with glyphs, or the unit's start, and where it stands.
+    from: (ClusterId, f32),
+    /// The next such boundary after it: the next cluster with glyphs, or
+    /// the unit's end.
+    to: (ClusterId, f32),
+    /// Where the unit ends across the line.
+    last: f32,
+}
+
+impl AcrossPlaces<'_> {
+    /// Where `at`'s first glyph is drawn across the line, where it is in
+    /// the unit and has glyphs of its own.
+    /// On layout's grid, to the nearest 1/64, as Chrome's caret rectangles
+    /// are `LayoutUnit`s.
+    fn drawn(&self, at: ClusterId) -> Option<f32> {
+        if at >= self.unit_end {
+            return None;
+        }
+        match self.glyphs.glyphs(at) {
+            ClusterGlyphs::Many(drawn) => drawn
+                .first()
+                .map(|glyph| LayoutUnit::from_px(self.baseline - glyph.y_offset.to_px()).to_px()),
+            ClusterGlyphs::One(_) | ClusterGlyphs::None => None,
+        }
+    }
+
+    /// The first boundary after `after` a cluster's glyphs give, or the
+    /// unit's end, and where it stands.
+    fn next_drawn(&self, after: ClusterId) -> (ClusterId, f32) {
+        let mut at = after;
+        loop {
+            work::step();
+            at = ClusterId::new(at.get() + 1);
+            if at >= self.unit_end {
+                return (self.unit_end, self.last);
+            }
+            if let Some(there) = self.drawn(at) {
+                return (at, there);
+            }
+        }
+    }
+
+    /// Where the boundary before `at` stands, `at` being from `from` to
+    /// `to`: theirs, or its even share of the span between them.
+    fn boundary(&self, at: ClusterId) -> f32 {
+        let ((from, start), (to, end)) = (self.from, self.to);
+        if at <= from {
+            return start;
+        }
+        if at >= to {
+            return end;
+        }
+        let share = unit::whole_to_f32(index_to_u32(at.get() - from.get()))
+            / unit::whole_to_f32(index_to_u32(to.get() - from.get()));
+        start + (end - start) * share
+    }
+}
+
+impl Iterator for AcrossPlaces<'_> {
+    /// A cluster, and where it starts and ends across the line, from the
+    /// line box's top.
+    type Item = (ClusterId, f32, f32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        work::step();
+        let at = self.next;
+        if at >= self.end {
+            return None;
+        }
+        if at >= self.to.0 {
+            self.from = self.to;
+            self.to = self.next_drawn(at);
+        }
+        let after = ClusterId::new(at.get() + 1);
+        self.next = after;
+        Some((at, self.boundary(at), self.boundary(after)))
+    }
+}
+
+impl fmt::Debug for TextRun<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TextRun")
+            .field("key", &self.key())
+            .field("text_range", &self.text_range())
+            .field("level", &self.level().get())
+            .field("inline", &self.inline())
+            .field("baseline", &self.baseline())
+            .field("font", &self.font())
+            .finish()
+    }
+}
+
+/// A font instance for rendering a text run.
+///
+/// Contains font bytes, collection index, pixel size, variation coordinates
+/// and synthetic styling. Returned by [`TextRun::font`] and passed to
+/// [`FontMetricsProvider`](crate::font::FontMetricsProvider).
+///
+/// Borrows from the layout without requiring a [`Context`](crate::Context).
+/// Use [`key`](Self::key) and coordinates for renderer caches; no internal
+/// layout id is required.
+///
+/// A strike cache must include the key, `coords`, `size`, `embolden`, `skew`,
+/// device scale and hinting settings. The face key alone is insufficient.
+#[derive(Copy, Clone)]
+#[non_exhaustive]
+pub struct FontInstance<'a> {
+    /// Shared font bytes and their identifier.
+    ///
+    /// Cloning retains the allocation without copying bytes.
+    pub bytes: &'a FontBytes,
+    /// The collection index, or zero for a single-font file.
+    pub index: u32,
+    /// The rendering size in pixels.
+    ///
+    /// Includes size reductions for synthesized small capitals and positions.
+    pub size: f32,
+    /// Normalized variation coordinates in `fvar` axis order.
+    ///
+    /// Reflects weight, width, style, optical sizing and face/element variation
+    /// settings. Empty for the default instance.
+    pub coords: &'a [NormalizedCoord],
+    /// Whether to apply synthetic bold.
+    pub embolden: bool,
+    /// The synthetic slant angle in clockwise CSS degrees, if any.
+    pub skew: Option<f32>,
+}
+
+impl<'a> FontInstance<'a> {
+    /// Returns the font file bytes.
+    pub fn data(&self) -> &'a [u8] {
+        self.bytes.data()
+    }
+
+    /// Returns the fontwich key: the byte-source identifier and collection index.
+    pub fn key(&self) -> FontKey {
+        FontKey {
+            source: self.bytes.id(),
+            index: self.index,
+        }
+    }
+}
+
+impl fmt::Debug for FontInstance<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FontInstance")
+            .field("key", &self.key())
+            .field("size", &self.size)
+            .field("coords", &self.coords)
+            .field("embolden", &self.embolden)
+            .field("skew", &self.skew)
+            .finish()
+    }
+}
+
+/// A positioned glyph.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct Glyph {
+    /// The glyph identifier in the run font.
+    pub id: u32,
+    /// The glyph origin along the line, relative to line-box left.
+    pub x: f32,
+    /// The glyph origin across the line, relative to line-box top.
+    ///
+    /// Equals the run baseline minus the upward glyph offset.
+    pub y: f32,
+    /// The pen advance in pixels.
+    ///
+    /// Includes shaping advance and, on the last glyph of a cluster, any
+    /// additional cluster spacing. Glyph advances sum to the cluster advance.
+    pub advance: f32,
+    /// The cluster start as a byte offset into [`Layout::text`](crate::Layout::text).
+    pub text_offset: usize,
+}
+
+/// Where a run's glyphs come from.
+///
+/// There is one per run being read, on the reader's stack and never in a
+/// collection, so the text walk's larger size costs nothing. Boxing it, as
+/// the lint asks, would allocate on every read.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
+enum Source<'a> {
+    /// The content's text: the paragraph's glyphs, and the line's own at its
+    /// reshaped edges.
+    Text(GlyphWalk<'a>),
+    /// Generated text's glyphs, shaped once during measurement, drawn from
+    /// the run's start with their own advances. The text is one character,
+    /// from `left`, `advance` wide, its glyphs sharing one text offset.
+    Generated {
+        glyphs: Iter<'a, SidecarGlyph>,
+        pen: InlineLayoutUnit,
+        offset: usize,
+        left: InlineLayoutUnit,
+        advance: InlineLayoutUnit,
+    },
+}
+
+/// A text run's glyphs, in drawing order: what [`TextRun::glyphs`] walks.
+#[derive(Clone)]
+pub(crate) struct RunGlyphs<'a> {
+    source: Source<'a>,
+    clusters: &'a ClusterTable,
+    /// The run's baseline from the line box's top, less any synthesized
+    /// raise, in pixels.
+    baseline: f32,
+}
+
+impl<'a> RunGlyphs<'a> {
+    /// `run`'s glyphs, in drawing order.
+    #[inline]
+    pub(crate) fn new(run: &TextRun<'a>) -> Self {
+        let layout = run.line.layout();
+        let baseline = run.glyph_baseline().to_px();
+        let clusters = &layout.analysis().clusters;
+        // Each arm makes the walk where the result keeps it, so that the
+        // text's walk, a few hundred bytes, is not copied on the way out.
+        match run.shaped_generated() {
+            Some(generated) => {
+                let glyphs = layout.measured().generated().glyphs(generated);
+                Self {
+                    source: Source::Generated {
+                        glyphs: glyphs.iter(),
+                        pen: run.item.inline,
+                        offset: clusters.start(run.item.clusters().start).get(),
+                        left: run.item.inline,
+                        advance: generated.advance,
+                    },
+                    clusters,
+                    baseline,
+                }
+            }
+            None => Self {
+                source: Source::Text(run.line.glyph_walk(run.item)),
+                clusters,
+                baseline,
+            },
+        }
+    }
+}
+
+impl RunGlyphs<'_> {
+    /// Returns the next glyph, with where its character starts along the line
+    /// and how far it reaches, in pixels.
+    ///
+    /// The character is its cluster, as the walk placed it, or generated
+    /// text's whole run. Text on a path turns the character about its middle.
+    #[inline]
+    pub(crate) fn next_placed(&mut self) -> Option<(Glyph, f32, f32)> {
+        match &mut self.source {
+            Source::Text(walk) => {
+                let (glyph, placed) = walk.next_placed()?;
+                let drawn = drawn(glyph, self.baseline, self.clusters);
+                // A compact cluster's place is its one glyph's.
+                let (left, step) = placed.map_or((drawn.x, drawn.advance), |(left, step)| {
+                    (left.to_px(), step.to_px())
+                });
+                Some((drawn, left, step))
+            }
+            Source::Generated { left, advance, .. } => {
+                let (left, advance) = (left.to_px(), advance.to_px());
+                Some((self.next()?, left, advance))
+            }
+        }
+    }
+}
+
+/// A text item's glyph as a renderer draws it, in pixels: its run's glyph
+/// baseline `baseline` from the line box's top, and the text it draws a
+/// byte offset of `clusters`.
+#[inline]
+fn drawn(glyph: ExactGlyph, baseline: f32, clusters: &ClusterTable) -> Glyph {
+    Glyph {
+        id: glyph.id,
+        x: glyph.x.to_px(),
+        y: baseline - glyph.y.to_px(),
+        advance: glyph.advance.to_px(),
+        text_offset: clusters.start(glyph.cluster).get(),
+    }
+}
+
+impl Iterator for RunGlyphs<'_> {
+    type Item = Glyph;
+
+    #[inline]
+    fn next(&mut self) -> Option<Glyph> {
+        match &mut self.source {
+            Source::Text(walk) => {
+                let glyph = walk.next()?;
+                Some(drawn(glyph, self.baseline, self.clusters))
+            }
+            Source::Generated {
+                glyphs,
+                pen,
+                offset,
+                ..
+            } => {
+                let glyph = glyphs.next()?;
+                let (dx, dy) = (glyph.x_offset, glyph.y_offset);
+                let advance = InlineLayoutUnit::from_text(glyph.advance);
+                let x = *pen + InlineLayoutUnit::from_text(dx);
+                *pen += advance;
+                Some(Glyph {
+                    id: glyph.id(),
+                    x: x.to_px(),
+                    y: self.baseline - dy.to_px(),
+                    advance: advance.to_px(),
+                    text_offset: *offset,
+                })
+            }
+        }
+    }
+}
+
+/// A text cluster and its position within a run.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct Cluster {
+    start: usize,
+    end: usize,
+    left: f32,
+    advance: f32,
+}
+
+impl Cluster {
+    /// Returns the byte range in [`Layout::text`](crate::Layout::text).
+    pub fn text_range(&self) -> Range<usize> {
+        self.start..self.end
+    }
+
+    /// Returns the cluster advance in pixels.
+    pub fn advance(&self) -> f32 {
+        self.advance
+    }
+
+    /// Returns inline extents relative to line-box left.
+    ///
+    /// For RTL clusters, the logical start is on the right.
+    pub fn inline(&self) -> InlineExtents {
+        InlineExtents {
+            left: self.left,
+            right: self.left + self.advance,
+        }
+    }
+}
+
+/// A text run's clusters, in logical order: what [`TextRun::clusters`]
+/// walks.
+#[derive(Clone)]
+pub(crate) struct RunClusters<'a> {
+    walk: ClusterWalk<'a>,
+    clusters: &'a ClusterTable,
+}
+
+impl<'a> RunClusters<'a> {
+    /// `run`'s clusters, in logical order.
+    pub(crate) fn new(run: &TextRun<'a>) -> Self {
+        Self {
+            walk: run.cluster_walk(),
+            clusters: &run.line.layout().analysis().clusters,
+        }
+    }
+}
+
+impl Iterator for RunClusters<'_> {
+    type Item = Cluster;
+
+    fn next(&mut self) -> Option<Cluster> {
+        let (cluster, left, advance) = self.walk.next()?;
+        let next = ClusterId::new(cluster.get() + 1);
+        Some(Cluster {
+            start: self.clusters.start(cluster).get(),
+            end: self.clusters.start(next).get(),
+            left: left.to_px(),
+            advance: advance.to_px(),
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.walk.size_hint()
+    }
+}
+
+impl ExactSizeIterator for RunClusters<'_> {}
