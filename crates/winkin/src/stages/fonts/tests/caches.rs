@@ -2,6 +2,8 @@
 //! keeps, caches across layouts and collections, rebuilds and dropped
 //! builders.
 
+use core::iter;
+
 use super::*;
 
 // Web fonts --------------------------------------------------------------------
@@ -17,7 +19,7 @@ fn a_pending_face_is_wanted_and_the_text_falls_back_meanwhile() {
         .add_face(
             "Brand",
             FaceDescriptors {
-                unicode_range: vec![0x0..=0xFF],
+                unicode_range: iter::once(0x0..=0xFF).collect(),
                 ..FaceDescriptors::default()
             },
             None,

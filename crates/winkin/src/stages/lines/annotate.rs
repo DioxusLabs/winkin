@@ -288,7 +288,10 @@ impl<'a> AnnotationRoom<'a> {
     ///
     /// Callers build one only where [`wanted`](Self::wanted) holds.
     pub(super) fn new(content: &Content, measured: &'a Measured, rule: EmphasisRoom) -> Self {
-        let marks = Some(measured).filter(|_| content.flags.contains(ContentFlags::EMPHASIS));
+        let marks = content
+            .flags
+            .contains(ContentFlags::EMPHASIS)
+            .then_some(measured);
         Self { marks, rule }
     }
 

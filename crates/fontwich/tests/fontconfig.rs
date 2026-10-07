@@ -294,7 +294,7 @@ fn the_spacing_probe_can_tell_the_two_kinds_apart() {
     let proportional =
         primary(Some("en-US"), GenericFamily::SansSerif).expect("a sans-serif family");
     assert!(
-        !family_spacing(&proportional).is_some_and(|s| s >= FC_MONO),
+        family_spacing(&proportional).is_none_or(|s| s < FC_MONO),
         "{proportional} is the sans-serif answer but reads as monospaced"
     );
 }
@@ -322,7 +322,7 @@ fn a_generic_family_is_honoured() {
         return;
     }
     assert!(
-        !family_spacing(&mono).is_some_and(|spacing| spacing < FC_MONO),
+        family_spacing(&mono).is_none_or(|spacing| spacing >= FC_MONO),
         "monospace resolved to {mono}, which fontconfig reports as proportional, \
          though it knows of {} monospaced {}: {monospaced:?}",
         monospaced.len(),

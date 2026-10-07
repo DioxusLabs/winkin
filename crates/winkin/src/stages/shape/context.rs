@@ -164,7 +164,12 @@ impl PlanLanguage {
                 // Turkish.
                 const HEX: &[u8; 16] = b"0123456789abcdef";
                 let mut named = *b"x-hbot-00000000";
-                for (digits, byte) in named[7..].chunks_exact_mut(2).zip(tag.to_bytes()) {
+                for (digits, byte) in named[7..]
+                    .as_chunks_mut::<2>()
+                    .0
+                    .iter_mut()
+                    .zip(tag.to_bytes())
+                {
                     digits[0] = HEX[usize::from(byte >> 4)];
                     digits[1] = HEX[usize::from(byte & 0xF)];
                 }

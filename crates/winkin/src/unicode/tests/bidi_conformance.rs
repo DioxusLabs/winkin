@@ -471,7 +471,7 @@ impl TestState {
                 self.count - self.failure_count,
                 self.count,
                 self.failure_count,
-                &self.failures
+                self.failures
             );
         }
     }

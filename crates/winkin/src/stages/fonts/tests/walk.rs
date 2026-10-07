@@ -2,6 +2,8 @@
 //! asking the list at every cluster chooses, over random text and styles,
 //! variation sequences among them.
 
+use core::iter;
+
 use super::*;
 use crate::tests::VARIATION_FONTS;
 
@@ -86,7 +88,7 @@ fn choosing_for_many_clusters_at_once_matches_asking_every_cluster() {
             .add_face(
                 "Brand",
                 FaceDescriptors {
-                    unicode_range: vec![0x41..=0x5A],
+                    unicode_range: iter::once(0x41..=0x5A).collect(),
                     ..FaceDescriptors::default()
                 },
                 None,

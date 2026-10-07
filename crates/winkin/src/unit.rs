@@ -631,10 +631,11 @@ mod tests {
     /// is nothing, and no NaN or infinity panics.
     #[test]
     fn a_vector_is_measured_to_the_nearest_float() {
-        use core::{f32, f64};
+        use core::f32::consts::SQRT_2;
+        use core::f64::consts::SQRT_2 as SQRT_2_WIDE;
         assert_eq!(hypot(3.0, 4.0), 5.0);
         assert_eq!(hypot(-5.0, 12.0), 13.0);
-        assert_eq!(hypot(1.0, 1.0), f32::consts::SQRT_2);
+        assert_eq!(hypot(1.0, 1.0), SQRT_2);
         assert_eq!(hypot(0.0, 0.0), 0.0);
         assert_eq!(hypot(0.0, -7.25), 7.25);
         assert_eq!(hypot(3e30, 4e30), 5e30);
@@ -644,7 +645,7 @@ mod tests {
         assert!(hypot(f32::NAN, 1.0).is_nan());
         for n in 1..2000u16 {
             let side = f32::from(n) * 0.37;
-            let exact = f64::from(side) * f64::consts::SQRT_2;
+            let exact = f64::from(side) * SQRT_2_WIDE;
             assert_eq!(hypot(side, side), exact as f32, "{side}");
         }
     }

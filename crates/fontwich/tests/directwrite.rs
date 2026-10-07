@@ -646,15 +646,25 @@ fn a_family_is_found_by_its_older_name_with_only_its_fonts() {
         weights.sort();
         Some(weights)
     };
-    assert_eq!(weights("Arial Black"), Some(vec![(900, 100)]));
     assert_eq!(
-        weights("Arial Narrow"),
-        Some(vec![(400, 75), (400, 75), (700, 75), (700, 75)])
+        weights("Arial Black"),
+        Some(vec![(900, 100)]),
+        "Arial Black"
     );
     assert_eq!(
         weights("Segoe UI Semibold"),
-        Some(vec![(600, 100), (600, 100)])
+        Some(vec![(600, 100), (600, 100)]),
+        "Segoe UI Semibold"
     );
+    // Arial Narrow comes with Office, not Windows.
+    match weights("Arial Narrow") {
+        Some(narrow) => assert_eq!(
+            narrow,
+            vec![(400, 75), (400, 75), (700, 75), (700, 75)],
+            "Arial Narrow"
+        ),
+        None => println!("skipping Arial Narrow: not installed"),
+    }
     // Every name listed has fonts behind it: Windows' downloadable fonts,
     // which have names and no files, are not listed.
     let empty = collection
@@ -666,7 +676,7 @@ fn a_family_is_found_by_its_older_name_with_only_its_fonts() {
                 .is_some_and(|family| family.fonts().is_empty())
         })
         .count();
-    assert_eq!(empty, 0);
+    assert_eq!(empty, 0, "families listed without fonts");
 }
 
 #[cfg(feature = "system")]
