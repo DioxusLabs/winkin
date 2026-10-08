@@ -306,7 +306,7 @@ fn a_box_wears_its_edges_on_their_own_sides() {
 /// So it stays at the line's visual end however the text before it reads.
 /// The case is `CD ` overridden right to left in a left-to-right paragraph.
 /// The space hangs under `pre-wrap` and is content under `break-spaces`.
-/// Either way it splits from the text it ends, as Blink's
+/// Either way it ends its item and splits from the text before it, as Blink's
 /// `SplitTrailingBidiPreservedSpace` splits it. A collapsible space is
 /// removed, and nothing else is reset.
 #[test]
@@ -350,4 +350,137 @@ fn preserved_trailing_white_space_takes_the_paragraph_level() {
             ]
         );
     }
+}
+
+/// Returns line `n`'s text items as clusters, level, and left and right edges
+/// in pixels from the area's line-left.
+fn text_spans(layout: &Layout, n: usize) -> Vec<(Range<usize>, u8, f32, f32)> {
+    let left = lefts(layout)[n];
+    items(layout, n)
+        .iter()
+        .filter(|item| item.kind() == FragmentItemKind::Text)
+        .map(|item| {
+            let clusters = item.clusters();
+            let from = left + item.inline.to_px();
+            (
+                clusters.start.get()..clusters.end.get(),
+                item.level.get(),
+                from,
+                from + item.size.to_px(),
+            )
+        })
+        .collect()
+}
+
+/// `break-spaces` white space ending a line inside one item's text keeps that text's level, as in Chrome.
+///
+/// Chrome splits a line's trailing preserved white space off to take the
+/// paragraph's level (UAX #9 rule L1) only where it ends an item or is all
+/// its item holds on the line. In a right-to-left paragraph in 40 px Ahem
+/// and 120 px, `XXX X` sets `XXX ` left to right at level 2, 160 px wide.
+/// The line overflows, so it stands at the start, from -40 to 120, however
+/// it is aligned. The second line's `X` aligns as asked. `XX  X` fits
+/// `XX ` exactly, its space at the right. Left to right, the first line
+/// stands from 0 to 160.
+#[test]
+fn break_spaces_white_space_inside_one_text_keeps_its_level() {
+    let mut fixture = fixture();
+    let mut layout = Layout::new();
+    let mut root = ahem(40.0);
+    root.text.white_space_collapse = WhiteSpaceCollapse::BreakSpaces;
+    for (align, second) in [
+        (TextAlign::Left, 0.0),
+        (TextAlign::Center, 40.0),
+        (TextAlign::Right, 80.0),
+        (TextAlign::Start, 80.0),
+        (TextAlign::End, 0.0),
+        (TextAlign::Justify, 80.0),
+    ] {
+        let block = ComputedBlockStyle {
+            direction: BaseDirection::Rtl,
+            text_align: align,
+            ..ComputedBlockStyle::new(&root)
+        };
+        fixture.block_text(&mut layout, &block, "XXX X");
+        fixture.lay_out(&mut layout, 120.0);
+        assert_eq!(texts(&layout), ["XXX ", "X"], "{align:?}");
+        assert_eq!(
+            text_spans(&layout, 0),
+            [(0..4, 2, -40.0, 120.0)],
+            "{align:?}"
+        );
+        assert_eq!(
+            text_spans(&layout, 1),
+            [(4..5, 2, second, second + 40.0)],
+            "{align:?}"
+        );
+    }
+    let rtl = ComputedBlockStyle {
+        direction: BaseDirection::Rtl,
+        text_align: TextAlign::Left,
+        ..ComputedBlockStyle::new(&root)
+    };
+    fixture.block_text(&mut layout, &rtl, "XX  X");
+    fixture.lay_out(&mut layout, 120.0);
+    assert_eq!(texts(&layout), ["XX ", " X"]);
+    assert_eq!(text_spans(&layout, 0), [(0..3, 2, 0.0, 120.0)]);
+    assert_eq!(text_spans(&layout, 1), [(3..5, 2, 0.0, 80.0)]);
+    let ltr = ComputedBlockStyle {
+        text_align: TextAlign::Left,
+        ..ComputedBlockStyle::new(&root)
+    };
+    fixture.block_text(&mut layout, &ltr, "XXX X");
+    fixture.lay_out(&mut layout, 120.0);
+    assert_eq!(text_spans(&layout, 0), [(0..4, 0, 0.0, 160.0)]);
+}
+
+/// `break-spaces` white space ending its item, or all its item holds on the line, takes the paragraph's level, as in Chrome.
+///
+/// In a right-to-left paragraph in 40 px Ahem and 120 px, Chrome sets the
+/// space of `<span>XXX </span>X` and of `<span>XXX</span><span> X</span>`
+/// at level 1, left of `XXX`: the space from -40 to 0 and `XXX` from 0 to
+/// 120. Under `pre-wrap` the space of `XXX X` hangs there too, inside one
+/// item.
+#[test]
+fn break_spaces_white_space_ending_its_item_takes_the_paragraph_level() {
+    let mut fixture = fixture();
+    let mut layout = Layout::new();
+    let mut root = ahem(40.0);
+    root.text.white_space_collapse = WhiteSpaceCollapse::BreakSpaces;
+    let block = ComputedBlockStyle {
+        direction: BaseDirection::Rtl,
+        ..ComputedBlockStyle::new(&root)
+    };
+    for (first, second) in [("XXX ", "X"), ("XXX", " X")] {
+        fixture.build(&mut layout, &block, |b| {
+            b.open_box(NodeKey(1), &root, None);
+            b.text(NodeKey(2), first);
+            b.close_box();
+            b.open_box(NodeKey(3), &root, None);
+            b.text(NodeKey(4), second);
+            b.close_box();
+        });
+        fixture.lay_out(&mut layout, 120.0);
+        assert_eq!(texts(&layout), ["XXX ", "X"], "{first:?}");
+        assert_eq!(
+            text_spans(&layout, 0),
+            [(3..4, 1, -40.0, 0.0), (0..3, 2, 0.0, 120.0)],
+            "{first:?}"
+        );
+    }
+    let mut pre_wrap = root;
+    pre_wrap.text.white_space_collapse = WhiteSpaceCollapse::Preserve;
+    fixture.block_text(
+        &mut layout,
+        &ComputedBlockStyle {
+            style: &pre_wrap,
+            ..block
+        },
+        "XXX X",
+    );
+    fixture.lay_out(&mut layout, 120.0);
+    assert_eq!(
+        text_spans(&layout, 0),
+        [(3..4, 1, -40.0, 0.0), (0..3, 2, 0.0, 120.0)]
+    );
 }

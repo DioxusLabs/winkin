@@ -353,7 +353,8 @@ impl<'a> Placer<'a> {
     /// It covers the spaces, tabs and other separators just before the
     /// content's end; they are content only under `break-spaces`. Blink's
     /// `SplitTrailingBidiPreservedSpace` splits the same off to set it at
-    /// the paragraph's level.
+    /// the paragraph's level, except inside one item's text
+    /// (`trailing_level_split`).
     fn trailing_space(&self, line: &LineView<'_>) -> ClusterId {
         let start = line.clusters().start;
         let mut at = line.content_end;
@@ -365,6 +366,47 @@ impl<'a> Placer<'a> {
             at = before;
         }
         at
+    }
+
+    /// Returns where trailing white space `trailing..end` takes the
+    /// paragraph's level, or `end` where it keeps its own.
+    ///
+    /// The caller has text of the same item before `trailing` on the line,
+    /// and the item going on past `end`. Chrome splits trailing white space
+    /// off only where it ends an item or is all its item holds on the line.
+    /// Chrome's items also end at a level change and around each tab, so the
+    /// white space keeps its level only where `trailing - 1` to `end`, both
+    /// included, hold no tab and are at one level.
+    ///
+    /// It walks a copy of the shaping run cursor forward, leaving the walk's
+    /// own cursor where it is.
+    fn trailing_level_split(
+        &self,
+        trailing: ClusterId,
+        end: ClusterId,
+        paragraph: BidiLevel,
+    ) -> ClusterId {
+        let before = ClusterId::new(trailing.get() - 1);
+        if (trailing..ClusterId::new(end.get() + 1))
+            .ids()
+            .any(|cluster| self.is(cluster, ClusterClass::Tab))
+        {
+            return trailing;
+        }
+        let runs = &self.stages.shaped.runs;
+        let mut cursor = self.run;
+        while cursor.end() <= before && cursor.id().get() + 1 < runs.len() {
+            runs.step(&mut cursor);
+        }
+        let level = self.run_level(runs.get(cursor.id()), paragraph);
+        while cursor.end() <= end && cursor.id().get() + 1 < runs.len() {
+            work::step();
+            runs.step(&mut cursor);
+            if self.run_level(runs.get(cursor.id()), paragraph) != level {
+                return trailing;
+            }
+        }
+        end
     }
 
     /// Returns where the spaces a collapsing text removes at `line`'s end
@@ -588,6 +630,13 @@ impl<'a> Placer<'a> {
         let mut level = paragraph;
         let mut u = x;
         let content = y.min(content_end.max(x));
+        // Trailing white space inside one stretch of this item's text keeps
+        // its level.
+        let trailing = if x < trailing && trailing < content && content < bounds.end {
+            self.trailing_level_split(trailing, content, paragraph)
+        } else {
+            trailing
+        };
         // The content: text by used font, and each tab on its own, in this
         // item's own pieces. A grapheme split by a style boundary still gets
         // a piece per part, though both parts share a shaping run, as Chrome

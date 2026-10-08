@@ -16,7 +16,9 @@
 //! **Bidi** follows Chrome.
 //! - L1: the line's trailing preserved white space takes the paragraph's
 //!   level. Under `break-spaces` it splits from the text before it, as
-//!   Blink's `SplitTrailingBidiPreservedSpace` does.
+//!   Blink's `SplitTrailingBidiPreservedSpace` does, only where it ends
+//!   its item or is all its item holds on the line. Inside one item's text
+//!   at one level it keeps that level.
 //! - L2: the pieces reorder by level with the resolver's `reorder`, as
 //!   Blink's `BidiReorder` does. A piece with no level of its own takes the
 //!   next piece's, or the paragraph's at the line's end.
