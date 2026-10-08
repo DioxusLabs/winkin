@@ -60,7 +60,7 @@ pub(crate) use trim::TextBoxTrims;
 
 use annotate::{AnnotationRoom, Carry};
 
-use height::{BoxStack, CarriedBoxes};
+use height::{BoxStack, CarriedBoxes, LineFonts};
 use score::{LineChoice, Scoring};
 
 use crate::config::{EmphasisRoom, Pretty, RubyBreakWithin};
@@ -1252,4 +1252,7 @@ struct Breaker<'a, 'c, 'm, 'provider> {
     /// The room the last kept line leaves the next at its end, or, for the
     /// first line, the room above the block.
     carry: Carry,
+    /// The text item and shaping run the last line's extent read, which the
+    /// next line's starts from.
+    line_fonts: LineFonts,
 }

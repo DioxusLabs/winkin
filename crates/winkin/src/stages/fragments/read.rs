@@ -432,13 +432,6 @@ impl<'a> Steps<'a> {
         };
         (left + right, left)
     }
-
-    /// Whether `ruby-align` spread room into the item, which its clusters
-    /// then step over one by one.
-    #[inline]
-    fn spread(&self) -> bool {
-        self.ends.0 != InlineLayoutUnit::ZERO || self.ends.1 != InlineLayoutUnit::ZERO
-    }
 }
 
 /// The clusters of one text item in logical order, each with its exact
@@ -539,6 +532,9 @@ pub(crate) struct GlyphWalk<'a> {
     /// Left to right, a cluster after the first starts at entry plus this.
     /// Right to left, a cluster before the last ends at this less its entry.
     base: InlineLayoutUnit,
+    /// Its clusters step by the prefix sums alone: no reshaped edge holds
+    /// one, it is no annotation, and `ruby-align` spread no room into it.
+    prefixed: bool,
     /// Left to right, not reshaped and not justified, so a cluster's left is
     /// its prefix entry plus `base`.
     straight: bool,
@@ -590,6 +586,7 @@ impl<'a> GlyphWalk<'a> {
             rtl: item.level.is_rtl(),
             origin: item.inline,
             base: InlineLayoutUnit::ZERO,
+            prefixed: false,
             straight: false,
             fast: false,
             straight_justified: false,
@@ -606,7 +603,11 @@ impl<'a> GlyphWalk<'a> {
         } else {
             item.inline - steps.pen
         };
-        let prefixed = steps.shapes.is_empty() && steps.annotation.is_none() && !steps.spread();
+        // The item's own bit says whether room was spread into it. Reading
+        // the room from the steps instead makes the compiler build them
+        // apart and copy them in, which slows reading a short run by a
+        // fifth.
+        let prefixed = steps.shapes.is_empty() && steps.annotation.is_none() && !item.is_spread();
         let straight = prefixed && steps.justify.is_none() && !item.level.is_rtl() && steps.len > 0;
         let straight_justified =
             prefixed && steps.justify.is_some() && !item.level.is_rtl() && steps.len > 0;
@@ -614,6 +615,7 @@ impl<'a> GlyphWalk<'a> {
         // sum.
         let annotation_rtl = item.level.is_rtl() && steps.annotation.is_some();
         walk.base = base;
+        walk.prefixed = prefixed;
         walk.straight = straight;
         walk.straight_justified = straight_justified;
         if annotation_rtl {
@@ -635,7 +637,7 @@ impl<'a> GlyphWalk<'a> {
         InlineLayoutUnit,
     ) {
         let steps = &self.steps;
-        if steps.shapes.is_empty() && steps.annotation.is_none() && !steps.spread() {
+        if self.prefixed {
             // One sum with the prefix entry, plus the room the clusters so
             // far took on a justified line.
             let word = self.words.get(i).copied().unwrap_or(GlyphWord::EMPTY);

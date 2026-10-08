@@ -85,6 +85,20 @@ fn a_line_takes_only_the_fonts_on_it() {
         assert_eq!(texts(&layout), lines, "{text}");
         assert_eq!(heights(&layout), expected, "{text}");
     }
+    // Over many lines, each found after the line before, and again at
+    // other widths, every line with a `漢` on it is 40px and every other 20.
+    let text = "ab 漢 ab ab ab ab 漢漢 ab ab ab ab ab 漢 ab";
+    fixture.text(&mut layout, &style, text);
+    for width in [50.0, 30.0, 80.0, 50.0] {
+        fixture.lay_out(&mut layout, width);
+        let lines = texts(&layout);
+        assert!(lines.len() > 3, "{width}: {lines:?}");
+        let expected: Vec<f32> = lines
+            .iter()
+            .map(|line| if line.contains('漢') { 40.0 } else { 20.0 })
+            .collect();
+        assert_eq!(heights(&layout), expected, "{width}: {lines:?}");
+    }
     let fixed = ComputedStyle {
         line: LineGroup {
             height: LineHeight::Factor(1.0),

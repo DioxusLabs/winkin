@@ -1,6 +1,7 @@
 //! Cost tests, in `crate::work` steps counted in debug builds. They pin:
 //! - each query linear in its line;
-//! - a word motion costing the distance it moves.
+//! - a word motion costing the distance it moves;
+//! - a step by character inside a right-to-left line costing no walk of it.
 
 use super::*;
 
@@ -165,4 +166,55 @@ fn a_word_motion_costs_the_distance_it_moves() {
             "{text}: {small} steps, then {large}"
         );
     }
+}
+
+/// A step by character on the screen inside a line of Arabic costs the same however long the line.
+///
+/// Where the line reads one way, the step is found in text order and
+/// neither caret is placed, so the line is not walked. Sixteen steps right
+/// and sixteen back left from the middle of a line twice as long take the
+/// same steps and seeks. So do sixteen steps right from the text's start,
+/// the right end of its only line, where the caret stays. Steps and seeks
+/// are counted in debug builds only.
+#[cfg(debug_assertions)]
+#[test]
+fn a_character_step_inside_an_arabic_line_costs_the_same_however_long_the_line() {
+    use crate::work;
+    let style = ahem();
+    let block = ComputedBlockStyle {
+        direction: BaseDirection::Rtl,
+        ..ComputedBlockStyle::new(&style)
+    };
+    let word = "\u{628}\u{62A}\u{633}\u{645} \u{644}\u{627}\u{628}. ";
+    let cost = |words: usize| {
+        let text = word.repeat(words);
+        let layout = laid_with(&block, 1e6, |b| b.text(NodeKey(1), &text));
+        assert_eq!(layout.lines().len(), 1);
+        let middle = snapped(&layout, Position::from(text.len() / 2)).position;
+        let _ = (work::take(), work::take_seeks());
+        let mut selection = Selection::from(middle);
+        for direction in [MotionDirection::Right, MotionDirection::Left] {
+            for _ in 0..16 {
+                selection.modify(&layout, direction.moving(Granularity::Character));
+            }
+        }
+        assert_eq!(selection.focus(), middle);
+        let start = Position::from(0);
+        let mut selection = Selection::from(start);
+        for _ in 0..16 {
+            selection.modify(
+                &layout,
+                MotionDirection::Right.moving(Granularity::Character),
+            );
+        }
+        assert_eq!(selection.focus(), start);
+        (work::take(), work::take_seeks())
+    };
+    let ((small, small_seeks), (large, large_seeks)) = (cost(100), cost(200));
+    assert!(small > 0);
+    assert_eq!(large, small, "steps");
+    assert!(
+        large_seeks <= small_seeks + 32,
+        "{small_seeks} seeks, then {large_seeks}"
+    );
 }

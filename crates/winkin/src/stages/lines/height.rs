@@ -424,25 +424,25 @@ impl LineStages<'_> {
     /// start or end that its fonts widened. That text is widened only by the
     /// fonts of its clusters on the line, as Chrome's
     /// `InlineBoxState::AccumulateUsedFonts` reads the fallback fonts of the
-    /// line's part of the shape result. One cursor over the shaping runs,
-    /// placed where it is first needed, finds them.
+    /// line's part of the shape result. `fonts` carries the text item and
+    /// the cursor over the shaping runs from the line before.
     #[inline]
     pub(super) fn extents_on_line(
         &self,
         from: ItemId,
         start: ClusterId,
         end: ClusterId,
+        fonts: &mut LineFonts,
         mut each: impl FnMut(ItemId, Extent),
     ) -> ItemId {
         let extents = &self.measured.extents;
-        let mut runs = None;
         self.items_on_line(from, start, end, |item, clusters| {
             let extent = extents.get(item);
             if clusters.start >= start && clusters.end <= end {
                 each(item, extent);
             } else {
                 let on_line = clusters.start.max(start)..clusters.end.min(end);
-                each(item, self.text_on_line(item, extent, on_line, &mut runs));
+                each(item, self.text_on_line(item, extent, on_line, fonts));
             }
         })
     }
@@ -452,53 +452,58 @@ impl LineStages<'_> {
     ///
     /// Only text under `line-height: normal` is widened by its fonts. Its
     /// extent on the line is its primary font's, united with that of each
-    /// font its clusters there are shaped in. `runs` is the line's cursor
-    /// over the shaping runs, which only moves forward.
+    /// font its clusters there are shaped in. Measurement united the fonts of
+    /// all the item's clusters, so once a font widens the text to the whole
+    /// item's extent, no other can widen it further.
     #[inline(never)]
     fn text_on_line(
         &self,
         item: ItemId,
         extent: Extent,
         on_line: Range<ClusterId>,
-        runs: &mut Option<RunCursor<ShapedRunId, ClusterId>>,
+        fonts: &mut LineFonts,
     ) -> Extent {
-        let content = self.content;
-        let Some(found) = content.items.get(item) else {
+        if extent.is_none() || on_line.is_empty() {
+            return extent;
+        }
+        let own = match fonts.item {
+            Some((known, own)) if known == item => own,
+            _ => {
+                let own = self.widened_text(item, extent);
+                fonts.item = Some((item, own));
+                own
+            }
+        };
+        let Some(own) = own else {
             return extent;
         };
-        if found.kind != ItemKind::Text || extent.is_none() || on_line.is_empty() {
-            return extent;
-        }
-        let text = self.text_facts(found.node);
-        if !matches!(content.facts.text(text).line_height, TextLineHeight::Normal) {
-            return extent;
-        }
-        let Some(primary) = self.fonts.primary_font(content.facts.text_request(text)) else {
-            return extent;
-        };
-        let own = normal_extent(&primary.metrics);
-        // Measurement found no font that widens it.
-        if own == extent {
-            return extent;
-        }
         let shaped = &self.shaped.runs;
-        let cursor = match runs {
-            Some(cursor) => cursor,
-            None => match shaped.cursor_containing(on_line.start) {
-                Some(cursor) => runs.insert(cursor),
+        // The cursor's run starts at or before `reusable`.
+        let cursor = match &mut fonts.runs {
+            Some((cursor, reusable)) if *reusable <= on_line.start => {
+                *reusable = on_line.end;
+                cursor
+            }
+            runs => match shaped.cursor_containing(on_line.start) {
+                Some(cursor) => &mut runs.insert((cursor, on_line.end)).0,
                 None => return extent,
             },
         };
         let mut united = own;
+        let mut last = None;
         loop {
             work::step();
             let before = cursor.id();
             if cursor.end() > on_line.start {
                 let font = shaped.get(before).map(|run| run.font);
-                if let Some(used) = font.and_then(|font| self.fonts.used.get(font)) {
+                // A font the line's text used already widens nothing.
+                if font != last
+                    && let Some(used) = font.and_then(|font| self.fonts.used.get(font))
+                {
                     united = united.unite(normal_extent(&used.metrics));
+                    last = font;
                 }
-                if cursor.end() >= on_line.end {
+                if cursor.end() >= on_line.end || united == extent {
                     return united;
                 }
             }
@@ -508,6 +513,42 @@ impl LineStages<'_> {
             }
         }
     }
+
+    /// Returns the primary font's extent of text item `item`, where its
+    /// fonts widened it past that to its measured `extent`.
+    ///
+    /// `None` where they did not, or where `item` is no text under
+    /// `line-height: normal`, whose fonts widen nothing.
+    fn widened_text(&self, item: ItemId, extent: Extent) -> Option<Extent> {
+        let content = self.content;
+        let found = content.items.get(item)?;
+        if found.kind != ItemKind::Text {
+            return None;
+        }
+        let text = self.text_facts(found.node);
+        if !matches!(content.facts.text(text).line_height, TextLineHeight::Normal) {
+            return None;
+        }
+        let primary = self.fonts.primary_font(content.facts.text_request(text))?;
+        let own = normal_extent(&primary.metrics);
+        (own != extent).then_some(own)
+    }
+}
+
+/// What a line's text extents carry to the next line: the text item last
+/// asked about, and the cursor over the shaping runs.
+///
+/// Lines are broken forward, so the text across one line's end is across
+/// the next line's start, and that line's runs follow. Each line then reads
+/// the item's facts and seeks its first run only where they change.
+#[derive(Default)]
+pub(super) struct LineFonts {
+    /// The text item, with its primary font's extent where its fonts
+    /// widened it.
+    item: Option<(ItemId, Option<Extent>)>,
+    /// The cursor, and the cluster at or after its run's start from which
+    /// a line may reuse it.
+    runs: Option<(RunCursor<ShapedRunId, ClusterId>, ClusterId)>,
 }
 
 /// Returns an unshifted line's `extent` united with the strut of every box
@@ -573,6 +614,7 @@ pub(super) fn shifted(
     stages: &LineStages<'_>,
     boxes: &mut BoxStack,
     shifts: &mut Table<LineShiftId, LineShift>,
+    fonts: &mut LineFonts,
     from: ItemId,
     start: ClusterId,
     end: ClusterId,
@@ -607,7 +649,7 @@ pub(super) fn shifted(
         }
         boxes.carried = carried;
     }
-    let resume = stages.extents_on_line(from, start, end, |id, extent| {
+    let resume = stages.extents_on_line(from, start, end, fonts, |id, extent| {
         let Some(item) = items.get(id) else {
             return;
         };

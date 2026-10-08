@@ -61,16 +61,65 @@ pub(super) fn by_character(
     rtl: bool,
 ) -> ClusteredPosition {
     let logical = motion::by_character(layout, focus.cluster, right != rtl);
-    if reads_one_way(layout, focus.cluster, logical.cluster, rtl)
-        && (!rtl || advances(layout, focus, logical, right))
-    {
-        return logical;
+    if reads_one_way(layout, focus.cluster, logical.cluster, rtl) {
+        if !rtl || advances(layout, focus, logical, right) {
+            return logical;
+        }
+        // Right of the last line's right end there is no stop.
+        if right && starts_last_line(layout, focus) {
+            return focus;
+        }
     }
     character_on_screen(layout, focus, right)
 }
 
+/// Returns whether `focus` is downstream at the start of the layout's last line, before drawn text.
+///
+/// The caller has checked that the text there reads right to left at the
+/// paragraph's level. The line's first cluster is then its rightmost, so
+/// the caret is at the line's right end with no stop past it, and no line
+/// follows for a step right to go on to.
+fn starts_last_line(layout: &Layout, focus: ClusteredPosition) -> bool {
+    let lines = layout.line_records();
+    if focus.position.affinity != Affinity::Downstream || lines.ruby.is_some() {
+        return false;
+    }
+    let drawn = matches!(
+        layout.analysis().clusters.class(focus.cluster),
+        Some(ClusterClass::Text | ClusterClass::Symbol | ClusterClass::Emoji)
+    );
+    drawn
+        && lines
+            .lines
+            .last()
+            .is_some_and(|line| line.clusters().start == focus.cluster)
+}
+
 /// Returns whether a logical step moves visibly the requested way on the same line.
+///
+/// The caller has checked that the text reads one way. There a step that
+/// stays at its offset does not move. A downstream caret is drawn on the
+/// line holding its offset, so two downstream positions on different lines
+/// have carets on different lines. Where both are on one line and the step
+/// crosses only drawn text, it moves the way the paragraph maps it. Only
+/// other steps place both carets, each a walk of the line.
 fn advances(layout: &Layout, from: ClusteredPosition, to: ClusteredPosition, right: bool) -> bool {
+    if from.offset() == to.offset() {
+        return false;
+    }
+    let downstream = from.position.affinity == Affinity::Downstream
+        && to.position.affinity == Affinity::Downstream;
+    if downstream && layout.line_records().ruby.is_none() {
+        let Some(line) = place::line(layout, from, None) else {
+            return false;
+        };
+        if place::line(layout, to, Some(line)) != Some(line) {
+            return false;
+        }
+        if crosses_drawn_text(layout, line, from.cluster, to.cluster) {
+            return true;
+        }
+    }
     let Some(from) = place::caret(layout, from, None) else {
         return false;
     };
@@ -83,6 +132,44 @@ fn advances(layout: &Layout, from: ClusteredPosition, to: ClusteredPosition, rig
         } else {
             to.inline.right < from.inline.left
         }
+}
+
+/// Returns whether every cluster between `from` and `to`, both on `line`, is drawn in a leaf of the line.
+///
+/// A letter, a symbol or an emoji is. A space is where such a cluster is on
+/// the line either side of the step; at a line's start or end it may be
+/// removed, or hang.
+fn crosses_drawn_text(layout: &Layout, line: LineId, from: ClusterId, to: ClusterId) -> bool {
+    let clusters = &layout.analysis().clusters;
+    let is_drawn = |cluster: ClusterId| {
+        matches!(
+            clusters.class(cluster),
+            Some(ClusterClass::Text | ClusterClass::Symbol | ClusterClass::Emoji)
+        )
+    };
+    let (low, high) = (from.min(to), from.max(to));
+    let line_start = layout
+        .line_records()
+        .lines
+        .get(line)
+        .map(|record| record.clusters().start);
+    let inside = || {
+        line_start.is_some_and(|start| start < low)
+            && is_drawn(ClusterId::new(low.get() - 1))
+            && is_drawn(high)
+    };
+    let mut spaces = false;
+    (low..high).ids().all(|cluster| {
+        work::step();
+        is_drawn(cluster)
+            || matches!(
+                clusters.class(cluster),
+                Some(ClusterClass::Space | ClusterClass::NoBreakSpace | ClusterClass::OtherSpace)
+            ) && (spaces || {
+                spaces = inside();
+                spaces
+            })
+    })
 }
 
 /// Returns the next word stop right or left of `focus` on the screen.

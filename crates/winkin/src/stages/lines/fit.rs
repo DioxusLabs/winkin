@@ -371,6 +371,7 @@ impl<'a: 'c, 'c, 'm, 'provider> Breaker<'a, 'c, 'm, 'provider> {
             continued: None,
             text_align: content.block.text_align,
             text_indent: content.block.text_indent,
+            line_fonts: height::LineFonts::default(),
         }
     }
 
@@ -379,6 +380,7 @@ impl<'a: 'c, 'c, 'm, 'provider> Breaker<'a, 'c, 'm, 'provider> {
     fn trade_views(&mut self) {
         if let Some(first_line) = &mut self.first_line {
             mem::swap(&mut self.stages, first_line);
+            self.line_fonts = height::LineFonts::default();
         }
     }
 
@@ -849,12 +851,16 @@ impl<'a: 'c, 'c, 'm, 'provider> Breaker<'a, 'c, 'm, 'provider> {
             let shifts = &mut out.shifts;
             shifts.truncate(kept);
             let boxes = &mut self.scratch.boxes;
-            return height::shifted(&self.stages, boxes, shifts, from, start, end);
+            let fonts = &mut self.line_fonts;
+            return height::shifted(&self.stages, boxes, shifts, fonts, from, start, end);
         }
         let mut extent = self.stages.measured.extents.strut;
-        let next = self.stages.extents_on_line(from, start, end, |_, own| {
-            extent = extent.unite(own);
-        });
+        let fonts = &mut self.line_fonts;
+        let next = self
+            .stages
+            .extents_on_line(from, start, end, fonts, |_, own| {
+                extent = extent.unite(own);
+            });
         // The boxes open across the start, whose struts the line holds.
         // Content with no box skips this. So does a paragraph whose every
         // box strut the block's strut already holds.

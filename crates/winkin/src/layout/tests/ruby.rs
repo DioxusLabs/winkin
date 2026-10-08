@@ -3070,3 +3070,41 @@ fn a_split_spread_base_takes_in_the_room_on_each_line() {
     ]);
     assert_near(&character_rects(&layout, note), &expected);
 }
+
+/// Each text item `ruby-align` spread room into carries the spread bit,
+/// and no other item does, on a base line and on its annotation line.
+///
+/// A glyph walk reads the bit to take the prefix sums, so it agrees with
+/// the spread rows. `AAAAAAAA` in 40px Ahem under `aa bb cc` at 20px
+/// spreads room into the annotation; `AA BB` under a wider annotation
+/// spreads room into the base.
+#[test]
+fn the_spread_bit_marks_the_text_with_spread_room() {
+    use crate::unit::InlineLayoutUnit;
+    let cases: [(&str, &str); 2] = [
+        ("AAAAAAAA", "aa bb cc"),
+        ("AA BB", "aaaa bbbb cccc dddd eeee"),
+    ];
+    for (base, annotation) in cases {
+        let (_, layout) =
+            spread_annotation(base, &[(annotation, false)], RubyAlign::SpaceAround, 800.0);
+        let fragments = layout.fragments();
+        let heads = fragments.line_heads.as_slice();
+        let items = fragments.items.as_slice();
+        let mut spread = 0;
+        for (index, head) in heads.iter().enumerate() {
+            let end = heads.get(index + 1).map_or(items.len(), |next| next.get());
+            let line = LineId::new(index);
+            for item in items.get(head.get()..end).unwrap_or_default() {
+                if item.kind() != FragmentItemKind::Text {
+                    continue;
+                }
+                let (left, right) = fragments.spread_room(line, item);
+                let has_room = left != InlineLayoutUnit::ZERO || right != InlineLayoutUnit::ZERO;
+                assert_eq!(item.is_spread(), has_room, "{base}: {item:?}");
+                spread += usize::from(has_room);
+            }
+        }
+        assert!(spread > 0, "{base}: nothing spread");
+    }
+}

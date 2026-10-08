@@ -166,6 +166,7 @@ const ALLOWED_DOORS: &[Entry] = &[
     ("src/selection/place.rs", "empty_items(", "entry: the boxes at a position"),
     ("src/selection/place.rs", "first_reaching(", "entry: the line upstream of a position"),
     ("src/selection/rects.rs", "place::line(", "entry: the lines holding a selection's ends"),
+    ("src/selection/visual.rs", "place::line(", "entry: the lines holding a character step's ends, which tell the step on the screen from the one in text order without placing either caret"),
     ("src/selection/words.rs", "clusters_containing(", "entry: the paragraph around a word boundary, kept while a motion stays in it"),
     ("src/layout/boxes.rs", "first_reaching(", "entry: an atomic inline's line, read alone"),
     ("src/layout/paint.rs", "first_from(", "entry: a line's paint starts its walk over the kept boxes at its first node, once a paint, where the line has no box item to start from"),
