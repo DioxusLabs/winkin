@@ -277,7 +277,7 @@ An inline-block or a replaced element is pushed with
 
 | Feature | Status | Notes and caveats | Config |
 |---|---|---|---|
-| Size and baseline | Supported | `BoxSize::baseline` is `None` for a box with no baseline, which aligns its margin box's bottom edge. Sizes and margins are truncated onto the grid, as in Chrome. | — |
+| Size and baseline | Supported | `BoxSize::baseline` is `None` for a box with no baseline, which aligns its margin box's bottom edge. Sizes and margins are truncated onto the grid, as in Chrome. `Layout::set_atomic_sizes` changes block sizes and baselines after building, outside ruby and initial letters. | — |
 | `vertical-align` | Supported | Against the margin box. An atomic has no strut of its own, as in Chrome. | — |
 | In the text | Supported | One U+FFFC: it has an offset, a caret on either side and a bidi class. It ends a run of white space. | — |
 
@@ -401,7 +401,7 @@ annotation starts the next column. Annotations are read back with
 
 | Property | Values | Status | Notes and caveats | Config |
 |---|---|---|---|---|
-| `text-emphasis-style` | any | Supported | Layout reads only whether marks are set (`TextEmphasis::marks`). The host draws the mark's shape. `TextRun::emphasis_marks` gives each mark's middle, baseline and size (half the text's size, rounded to a pixel), one per grapheme cluster that takes one. | — |
+| `text-emphasis-style` | any | Supported | Layout reads only whether marks are set (`TextEmphasis::marks`). The host draws the mark's shape. `TextRun::emphasis_marks` gives each mark's middle, baseline and size (half the text's size, rounded to a pixel), one per grapheme cluster that takes one. The host centres the mark glyph's ink bounds on the middle, in vertical text too, as Chrome does. | — |
 | `text-emphasis-position` | `over`, `under`; `right`, `left` | Supported | `over` and `under` apply in horizontal and sideways lines, `right` and `left` in vertical ones, as CSS Text Decoration 4 says. Chrome reads `right` and `left` in sideways lines too; winkin does not copy that. Marks go past an annotation on the same side. | — |
 | `text-emphasis-skip` | `spaces`, `punctuation`, `symbols`, `narrow` | Beyond Chrome | Chrome always skips spaces and punctuation, the initial value. | — |
 | `text-emphasis-color` | — | Supported | The host's: it paints the marks. | — |

@@ -80,14 +80,14 @@ pub(crate) struct PlaceInput<'a> {
 /// Lays out every line of `input` into `out`, one line at a time.
 ///
 /// Uses the block's trim, end and baselines that breaking finished, and
-/// works in `scratch`. Clears and fills `out`; nothing else writes it.
+/// works in `scratch`. Fills `out`, which starts empty; nothing else fills
+/// it.
 pub(crate) fn place_fragments(
     input: &PlaceInput<'_>,
     scratch: &mut PlaceScratch,
     out: &mut Fragments,
 ) {
     debug_assert_eq!(input.lines.lines.len(), input.placements.len());
-    out.clear();
     scratch.begin();
     Placer::new(input, input.lines.block).lines(scratch, out);
 }

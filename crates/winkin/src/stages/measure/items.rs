@@ -41,6 +41,13 @@ impl ItemExtents {
             .push_bounded(extent, "an extent an item, which an ItemId names");
     }
 
+    /// Gives `item` `extent` again, where it has one.
+    pub(super) fn set(&mut self, item: ItemId, extent: Extent) {
+        if let Some(kept) = self.extents.get_mut(item) {
+            *kept = extent;
+        }
+    }
+
     /// How far `item` reaches either side of its baseline, or
     /// [`Extent::NONE`] past the last.
     #[inline]

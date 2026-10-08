@@ -749,6 +749,24 @@ impl Measured {
         Advances::new(text, first_line)
     }
 
+    /// Measures atomic inline `atomic`'s extent again from its row in
+    /// `content`, as the scan measures it.
+    ///
+    /// The content holds no ruby and no initial letter, so an atomic
+    /// inline's extent reaches its own item and nothing else, in the text's
+    /// measure and the first line's. What runs along the line is unchanged.
+    pub(crate) fn remeasure_atomic(&mut self, content: &Content, atomic: AtomicId) {
+        let Some(atomic) = content.atomics().get(atomic) else {
+            return;
+        };
+        let baseline = LineBaseline::from_content(content);
+        let extent = Extent::from_atomic(atomic, content.block.writing_mode, baseline);
+        self.text.text_mut().extents.set(atomic.item, extent);
+        if let Some(first_line) = self.text.kept_first_line_mut() {
+            first_line.extents.set(atomic.item, extent);
+        }
+    }
+
     /// Returns the first line's measure: the first paragraph under
     /// `::first-line` styles.
     ///

@@ -56,7 +56,9 @@ use core::cell::Cell;
 use core::ops::Range;
 
 use crate::build::{BoxSize, BuildReport, Clear, FloatSide, OriginalDisplay};
-use crate::data::{Id, Keyed, Table, TextOffset, define_flags, define_id, find_sorted, heap_bytes};
+use crate::data::{
+    HashIndex, Id, Keyed, Table, TextOffset, define_flags, define_id, find_sorted, heap_bytes,
+};
 use crate::style::{
     ComputedStyle, FirstLineVariant, InitialLetter, VerticalAlign, WhiteSpaceTrim, WritingMode,
 };
@@ -480,6 +482,64 @@ impl Keyed for Atomic {
     }
 }
 
+/// A search of the atomic inlines for those with one key, round from a
+/// cursor: from it to the last, then from the first up to it.
+///
+/// Where no two atomic inlines share a key, it ends at the first it finds.
+/// A search started where the last ended then costs the distance between
+/// the two, so keys in reading order cost one pass in total.
+pub(crate) struct KeyedAtomics {
+    key: NodeKey,
+    /// Where the search started, and stops on coming round to it.
+    start: AtomicId,
+    /// The next atomic inline to look at.
+    next: AtomicId,
+    /// Whether the search has come round past the last.
+    wrapped: bool,
+    /// Whether no two atomic inlines share a key.
+    unique: bool,
+    /// The last atomic inline found.
+    last: Option<AtomicId>,
+}
+
+impl KeyedAtomics {
+    /// Returns the next atomic inline of `content` with the key, or `None`
+    /// once the search has come round.
+    pub(crate) fn next_match(&mut self, content: &Content) -> Option<AtomicId> {
+        if self.unique && self.last.is_some() {
+            return None;
+        }
+        let atomics = content.atomics();
+        loop {
+            if self.wrapped && self.next >= self.start {
+                return None;
+            }
+            let Some(atomic) = atomics.get(self.next) else {
+                if self.wrapped || self.start == AtomicId::new(0) {
+                    return None;
+                }
+                self.wrapped = true;
+                self.next = AtomicId::new(0);
+                continue;
+            };
+            work::step();
+            let id = self.next;
+            self.next = AtomicId::new(id.get() + 1);
+            if content.atomic_key(atomic) == self.key {
+                self.last = Some(id);
+                return Some(id);
+            }
+        }
+    }
+
+    /// Returns where the next search starts: after the last atomic inline
+    /// found, or where this one started if it found none.
+    pub(crate) fn cursor(&self) -> AtomicId {
+        self.last
+            .map_or(self.start, |last| AtomicId::new(last.get() + 1))
+    }
+}
+
 /// A float's size and side, found from its anchor item.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub(crate) struct Float {
@@ -822,6 +882,8 @@ define_flags! {
         /// Some node's first-line text shapes otherwise than its own: its
         /// [`ShapingFactsId`] differs.
         pub(crate) const FIRST_LINE_RESHAPES = 1 << 21;
+        /// Two atomic inlines have the same key.
+        const SHARED_ATOMIC_KEYS = 1 << 22;
     }
 }
 
@@ -995,6 +1057,57 @@ impl Content {
     /// halving.
     pub(crate) fn item_absolute(&self, item: ItemId) -> Option<&Absolute> {
         find_sorted(self.absolutes().as_slice(), item)
+    }
+
+    /// Whether the atomic inlines' block sizes and baselines can be set
+    /// in place: the content has no ruby and no initial letter, whose
+    /// measure reads an atomic inline's extent beyond the inline's own item.
+    pub(crate) fn can_resize_atomics(&self) -> bool {
+        !self.flags.contains(ContentFlags::RUBY)
+            && !self.flags.contains(ContentFlags::INITIAL_LETTER)
+    }
+
+    /// Returns a search for the atomic inlines keyed `key`, round from
+    /// `from`.
+    pub(crate) fn keyed_atomics(&self, key: NodeKey, from: AtomicId) -> KeyedAtomics {
+        let start = from.min(self.atomics().next_id());
+        KeyedAtomics {
+            key,
+            start,
+            next: start,
+            wrapped: false,
+            unique: !self.flags.contains(ContentFlags::SHARED_ATOMIC_KEYS),
+            last: None,
+        }
+    }
+
+    /// The key of the node `atomic` belongs to.
+    fn atomic_key(&self, atomic: &Atomic) -> NodeKey {
+        self.nodes.key(self.item_node(atomic.item))
+    }
+
+    /// The border box and baseline atomic inline `atomic` has, or `None`
+    /// past the last.
+    pub(crate) fn atomic_size(&self, atomic: AtomicId) -> Option<BoxSize> {
+        self.atomics().get(atomic).map(|atomic| atomic.size)
+    }
+
+    /// Gives atomic inline `atomic` the block size and baseline of `size`,
+    /// a sanitized size with the inline size it was built with. Returns
+    /// whether its size changed.
+    pub(crate) fn set_atomic_size(&mut self, atomic: AtomicId, size: BoxSize) -> bool {
+        let Some(atomic) = self
+            .extras
+            .as_deref_mut()
+            .and_then(|extras| extras.atomics.get_mut(atomic))
+        else {
+            return false;
+        };
+        if atomic.size == size {
+            return false;
+        }
+        atomic.size = size;
+        true
     }
 
     /// The atomic inline `item` places, or `None` where it places none.
@@ -1240,6 +1353,9 @@ pub(crate) struct ContentWriter<'a> {
     /// The text facts each style given this build was lowered into, where
     /// a build has made it.
     memo: &'a mut Option<Box<StyleMemo>>,
+    /// The atomic inlines written so far by the hash of their keys, until
+    /// two share one, where a build has made it.
+    atomic_keys: &'a mut Option<Box<HashIndex>>,
     /// How the text written in the block, outside every container, is
     /// transformed.
     block_transforms: Transforms,

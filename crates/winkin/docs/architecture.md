@@ -15,6 +15,9 @@ computed style. `LayoutBuilder::finish` prepares everything that does not
 depend on the available width. `Layout::break_lines` then breaks the content
 into lines for one width. Preparing runs once per content change; breaking
 runs once per width, and a second width repeats none of the preparation.
+`Layout::set_atomic_sizes` gives atomic inlines new block sizes and
+baselines without building again: it measures again the extents of those
+whose size changed, and keeps the rest.
 
 The host reads the result through views on [`Layout`](../src/layout/mod.rs):
 lines and the items on them, paint operations, box fragments, floats and

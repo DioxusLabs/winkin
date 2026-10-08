@@ -3,7 +3,8 @@
 //! - what `text-emphasis-skip` leaves bare;
 //! - a ligature's advance shared among its marks;
 //! - the side each writing mode sets marks on;
-//! - marks over an annotated base.
+//! - marks over an annotated base;
+//! - a mark's middle whatever its font's metrics.
 
 use super::*;
 
@@ -233,4 +234,60 @@ fn an_emphasis_mark_over_an_annotated_base_goes_past_the_annotation() {
         .filter(|kind| *kind != "other")
         .collect();
     assert_eq!(order, ["annotation", "text", "mark", "mark"]);
+}
+
+/// A mark's middle along the line is its cluster's whatever the font's
+/// ascent, descent and vertical metrics, in every writing mode. The font
+/// has Meiryo's metrics: a 2048-unit em, ascent 2171 and descent 901, each
+/// glyph 2048 down the line with a top side bearing of 450. Chrome 153
+/// centres the ink of a U+25CF mark on its base's middle in Meiryo and in
+/// Yu Gothic alike: at 40 px, 20 along the line within half a pixel, and at
+/// 100 and 160 px, 50.0 and 80.0.
+#[test]
+fn an_emphasis_mark_is_centred_on_its_cluster_whatever_the_font_metrics() {
+    use crate::style::WritingMode;
+    use crate::tests::TestVertical;
+    let mut font = TestFont::new("Test Tall Ascent", &[(0x8A66, 0x8A66)]);
+    font.upem = 2048;
+    font.win = (2171, 901);
+    font.hhea = (2171, -901, 0);
+    font.typo = (1798, -250, 0);
+    font.advances = vec![('\u{8A66}', 2048)];
+    font.vertical = Some(TestVertical {
+        advance: 2048,
+        top_side_bearing: 450,
+        advances: Vec::new(),
+        origins: None,
+    });
+    let mut layer = LayerBuilder::new(Role::Application);
+    assert!(layer.add_data(font.build()).is_ok());
+    layer.set_fallback_override(TestFallback::new().family("Test Tall Ascent"));
+    let mut cx = Context::new(Collection::new().with_layer(layer.snapshot()));
+    const TALL: [FontFamilyName<'static>; 1] =
+        [FontFamilyName::Named(Cow::Borrowed("Test Tall Ascent"))];
+    let mut layout = Layout::new();
+    for mode in [
+        WritingMode::VerticalRl,
+        WritingMode::VerticalLr,
+        WritingMode::HorizontalTb,
+    ] {
+        for size in [40.0, 24.0] {
+            let mut style = sized(&TALL, size);
+            style.line.height = LineHeight::Px(size);
+            style.text.emphasis.marks = true;
+            let block = ComputedBlockStyle {
+                writing_mode: mode,
+                ..ComputedBlockStyle::new(&style)
+            };
+            build(&mut cx, &mut layout, &block, |b| {
+                b.text(NodeKey(1), "\u{8A66}\u{8A66}");
+            });
+            layout.break_lines(&mut cx, Area::new(400.0), &mut NoExclusions);
+            let middles: Vec<f32> = runs(&layout, 0)
+                .iter()
+                .flat_map(|run| run.emphasis_marks().map(|mark| mark.x))
+                .collect();
+            assert_eq!(middles, [size / 2.0, size * 1.5], "{mode:?} at {size}");
+        }
+    }
 }

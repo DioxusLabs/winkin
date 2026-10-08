@@ -241,7 +241,7 @@ const WIDTHS: [f32; 3] = [240.0, 97.5, 600.0];
 ///   the styles into, and the block's own facts. The measure stage's text
 ///   metrics take 24, their table's.
 /// - The layout keeps no style table. The builder's memo of the styles it
-///   lowered takes 8, boxed.
+///   lowered takes 8, boxed, and its index of atomic inline keys 8, boxed.
 /// - The lines keep how far the first line's annotations move an initial
 ///   letter: 4 bytes, 8 with padding.
 ///

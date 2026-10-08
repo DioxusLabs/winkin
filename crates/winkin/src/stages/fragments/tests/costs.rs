@@ -50,6 +50,7 @@ fn the_ragged_article_relays_out_and_reads_back() {
             pretty: Pretty::Limited,
             ruby_break_within: RubyBreakWithin::BaseOpportunities,
         };
+        lines_alone.clear();
         let start = Instant::now();
         lines::break_lines(
             &input,
@@ -200,6 +201,7 @@ fn the_ruby_article_relays_out_and_reads_back() {
             pretty: Pretty::Limited,
             ruby_break_within: RubyBreakWithin::BaseOpportunities,
         };
+        lines_alone.clear();
         let start = Instant::now();
         lines::break_lines(
             &input,
@@ -814,6 +816,8 @@ fn a_deep_nesting_lays_out_in_time_with_its_depth() {
                         pretty: Pretty::Limited,
                         ruby_break_within: RubyBreakWithin::BaseOpportunities,
                     };
+                    lines.clear();
+                    fragments.clear();
                     let start = Instant::now();
                     lines::break_lines(
                         &input,

@@ -197,3 +197,60 @@ fn shifted_boxes_atomics_and_trim_allocate_nothing_warm() {
         }
     }
 }
+
+/// The key and inline size of each atomic inline [`document`] writes, in
+/// document order, for `repeat` times over.
+fn atomic_keys(repeat: usize) -> Vec<(NodeKey, f32)> {
+    let mut keys = Vec::new();
+    let mut key = 0;
+    for n in 0..repeat {
+        keys.push((NodeKey(key + 6), 12.0));
+        keys.push((NodeKey(key + 8), 20.0));
+        key += if n % 4 == 3 { 9 } else { 8 };
+    }
+    keys
+}
+
+/// Sets every atomic inline in `keys` in one call: those 12 wide to block
+/// size `block`, those 20 wide to half as much.
+fn resize(layout: &mut Layout, keys: &[(NodeKey, f32)], block: f32) -> bool {
+    layout.set_atomic_sizes(keys.iter().map(|&(key, inline)| {
+        let block = if inline == 12.0 { block } else { block / 2.0 };
+        let size = BoxSize {
+            inline,
+            block,
+            baseline: Some(block / 3.0),
+        };
+        (key, size)
+    }))
+}
+
+/// Setting atomic inlines' sizes in a warm layout allocates nothing, and nor
+/// does breaking it again and reading it back.
+#[test]
+fn setting_atomic_sizes_allocates_nothing_warm() {
+    let widths = [40.0, 95.5, 230.0, 700.0, 3.0];
+    let mut cx = Context::new(collection());
+    let mut layout = Layout::new();
+    document(&mut layout, &mut cx, 16);
+    let keys = atomic_keys(16);
+    for &width in &widths {
+        layout.break_lines(&mut cx, Area::new(width), &mut NoExclusions);
+        read(&layout);
+    }
+    assert!(
+        resize(&mut layout, &keys, 25.0),
+        "every atomic inline is set"
+    );
+    assert_eq!(layout.lines().len(), 0, "a new size clears the lines");
+    let warm = count_allocations(|| {
+        for block in [9.0, 41.5, 0.0] {
+            assert!(resize(&mut layout, &keys, block));
+            for &width in &widths {
+                layout.break_lines(&mut cx, Area::new(width), &mut NoExclusions);
+                read(&layout);
+            }
+        }
+    });
+    assert_eq!(warm, 0, "setting sizes and breaking again allocated");
+}

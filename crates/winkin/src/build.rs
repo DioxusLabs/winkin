@@ -115,7 +115,7 @@ impl BoxSize {
     ///
     /// A size that is not finite, or is negative, becomes zero. A baseline that
     /// is not finite becomes none.
-    fn sanitized(self) -> Self {
+    pub(crate) fn sanitized(self) -> Self {
         let size = |n: f32| if n.is_finite() && n > 0.0 { n } else { 0.0 };
         Self {
             inline: size(self.inline),

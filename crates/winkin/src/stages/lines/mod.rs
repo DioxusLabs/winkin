@@ -144,10 +144,11 @@ impl Default for BreakScratch {
     }
 }
 
-/// Breaks the text of `input` into lines in its area, into `out`.
+/// Breaks the text of `input` into lines in its area, into `out`, which
+/// starts empty.
 ///
 /// Reshapes unsafe line edges with the shaping caches in `cx`, and works out
-/// line heights in `scratch`. Only this function writes `out`, so a relayout
+/// line heights in `scratch`. Only this function fills `out`, so a relayout
 /// at another width repeats nothing prepared.
 ///
 /// [`Breaker::line`] fits every line. It places floats and the initial
@@ -168,7 +169,6 @@ pub(crate) fn break_lines(
     exclusions: &mut dyn Exclusions,
     out: &mut Lines,
 ) {
-    out.clear();
     scratch.placements.clear();
     scratch.carried.begin();
     let area = input.area;

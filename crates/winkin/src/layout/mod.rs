@@ -52,11 +52,12 @@ mod tests;
 #[cfg(test)]
 use alloc::vec::Vec;
 use core::fmt;
+use core::iter;
 use core::ops::Range;
 
 use fontwich::FaceId;
 
-use crate::build::{BuildOptions, BuildReport, LayoutBuilder};
+use crate::build::{BoxSize, BuildOptions, BuildReport, LayoutBuilder};
 use crate::config::PastLines;
 #[cfg(test)]
 use crate::config::PunctuationTrim;
@@ -71,7 +72,7 @@ use crate::stages::Stages;
 use crate::stages::analysis::{self, Analysis, AnalysisInput};
 #[cfg(test)]
 use crate::stages::content::TextFactsId;
-use crate::stages::content::{Content, NodeKey};
+use crate::stages::content::{AtomicId, Content, NodeKey};
 use crate::stages::content::{ContentLimits, ContentScratch, ContentWriter};
 use crate::stages::fonts::{self, FontInput, Fonts};
 use crate::stages::fragments::{self, Fragments, PlaceInput, ReadInput};
@@ -272,6 +273,84 @@ impl Layout {
         options: BuildOptions,
     ) -> LayoutBuilder<'a> {
         self.builder_within(key, block, options, ContentLimits::MAX)
+    }
+
+    /// Sets the block sizes and baselines of atomic inlines, keeping the
+    /// prepared content.
+    ///
+    /// Each pair in `sizes` gives every atomic inline with its key the border
+    /// box and baseline of its size, as [`LayoutBuilder::atomic`] takes them.
+    /// Keys need not be unique. Only the extents across the line of the
+    /// inlines whose size changes are measured again: analysis, fonts,
+    /// shaping and the intrinsic sizes are kept. A warm call does not
+    /// allocate.
+    ///
+    /// Where no two atomic inlines share a key, pairs in document order take
+    /// time linear in the number of atomic inlines. Pairs in any other order
+    /// give the same result.
+    ///
+    /// Where a size changes, the lines are cleared: lines, box fragments,
+    /// static positions, hit tests and paints see no lines until the next
+    /// [`break_lines`](Self::break_lines). The result then equals building
+    /// the content again with the new sizes.
+    ///
+    /// Returns `false`, changing nothing, where any pair needs the content
+    /// built again: no atomic inline has its key, its `size.inline` differs
+    /// from the inline size an atomic inline with that key was built with,
+    /// or the content has ruby or an initial letter. `sizes` is cloned so
+    /// that every pair is checked before any is set.
+    pub fn set_atomic_sizes<I>(&mut self, sizes: I) -> bool
+    where
+        I: IntoIterator<Item = (NodeKey, BoxSize)>,
+        I::IntoIter: Clone,
+    {
+        let sizes = sizes.into_iter();
+        let content = &self.content;
+        let mut cursor = AtomicId::new(0);
+        for (key, size) in sizes.clone() {
+            if !content.can_resize_atomics() {
+                return false;
+            }
+            let inline = size.sanitized().inline;
+            let mut search = content.keyed_atomics(key, cursor);
+            let mut found = false;
+            while let Some(atomic) = search.next_match(content) {
+                if !content
+                    .atomic_size(atomic)
+                    .is_some_and(|built| built.inline == inline)
+                {
+                    return false;
+                }
+                found = true;
+            }
+            if !found {
+                return false;
+            }
+            cursor = search.cursor();
+        }
+        let mut changed = false;
+        let mut cursor = AtomicId::new(0);
+        for (key, size) in sizes {
+            let size = size.sanitized();
+            let mut search = self.content.keyed_atomics(key, cursor);
+            while let Some(atomic) = search.next_match(&self.content) {
+                if self.content.set_atomic_size(atomic, size) {
+                    self.stages.measured.remeasure_atomic(&self.content, atomic);
+                    changed = true;
+                }
+            }
+            cursor = search.cursor();
+        }
+        if changed {
+            self.clear_lines();
+        }
+        true
+    }
+
+    /// Sets the block size and baseline of each atomic inline keyed `key`,
+    /// as [`set_atomic_sizes`](Self::set_atomic_sizes) does for one pair.
+    pub fn set_atomic_size(&mut self, key: NodeKey, size: BoxSize) -> bool {
+        self.set_atomic_sizes(iter::once((key, size)))
     }
 
     /// Breaks and positions the content in `area`.
@@ -584,8 +663,7 @@ impl Layout {
         limits: ContentLimits,
     ) -> LayoutBuilder<'a> {
         // Lines broken from the content before would name its clusters.
-        self.lines.clear();
-        self.fragments.clear();
+        self.clear_lines();
         LayoutBuilder::new(
             ContentWriter::new(
                 &mut self.content,
@@ -599,6 +677,12 @@ impl Layout {
         )
     }
 
+    /// Clears line layout's outputs: the lines and their fragments.
+    fn clear_lines(&mut self) {
+        self.lines.clear();
+        self.fragments.clear();
+    }
+
     fn break_lines_with_provider(
         &mut self,
         cx: &mut Context,
@@ -607,6 +691,7 @@ impl Layout {
         provider: Option<&dyn FontMetricsProvider>,
     ) {
         cx.start_break(self.content.size());
+        self.clear_lines();
         // What preparing made, borrowed immutably, so it stays frozen.
         let stages = self.stages.view(&self.content);
         let (lines, fragments) = (&mut self.lines, &mut self.fragments);

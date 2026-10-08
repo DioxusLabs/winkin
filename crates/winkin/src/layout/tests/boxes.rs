@@ -4,6 +4,7 @@
 //! - atomic inlines as their margin boxes.
 
 use super::*;
+use crate::style::{VerticalAlign, WritingMode};
 
 /// A box's edges' room along a line, `left` at its left and `right` at its
 /// right.
@@ -342,4 +343,323 @@ fn an_empty_box_after_a_lines_last_space_ends_the_line() {
     };
     assert_eq!(pieces(2), [(1, along(0.0, 32.0))]);
     assert_eq!(pieces(3), [(1, along(2.0, 2.0))]);
+}
+
+/// Everything a host reads of laid-out lines: each line's metrics and
+/// records, every item's key and place, and the block's metrics.
+fn laid_out(layout: &Layout) -> String {
+    let mut read = format!("{:?}\n", layout.metrics());
+    read += &format!("{:?}\n", layout.line_records().lines.as_slice());
+    for line in layout.lines() {
+        read += &format!("{:?}\n", line.metrics());
+        for item in line.all_items() {
+            read += &match item {
+                Item::Text(run) | Item::Generated(run) => format!(
+                    "text {:?} {:?} {:?} {}\n",
+                    run.key(),
+                    run.inline(),
+                    run.block(),
+                    run.baseline()
+                ),
+                Item::Atomic(atomic) => format!(
+                    "atomic {:?} {:?} {:?} {}\n",
+                    atomic.key(),
+                    atomic.inline(),
+                    atomic.block(),
+                    atomic.baseline()
+                ),
+                Item::Box(piece) => format!(
+                    "box {:?} {:?} {:?} {}\n",
+                    piece.key(),
+                    piece.inline(),
+                    piece.block(),
+                    piece.baseline()
+                ),
+            };
+        }
+    }
+    read
+}
+
+/// Text with atomic inlines aligned every way, two of them inside a box
+/// that is aligned itself, sized by `size(n)` for the `n`th atomic inline,
+/// under a `::first-line` that sets the first line's text larger.
+fn aligned_atomics(
+    cx: &mut Context,
+    layout: &mut Layout,
+    block: ComputedBlockStyle<'_>,
+    size: impl Fn(u64) -> BoxSize,
+) {
+    let root = block.style;
+    let aligns = [
+        VerticalAlign::Baseline,
+        VerticalAlign::Super,
+        VerticalAlign::Middle,
+        VerticalAlign::TextTop,
+        VerticalAlign::TextBottom,
+        VerticalAlign::Top,
+        VerticalAlign::Bottom,
+        VerticalAlign::Px(3.5),
+    ];
+    let aligned = |n: u64| ComputedStyle {
+        line: LineGroup {
+            vertical_align: aligns[n as usize % aligns.len()],
+            ..root.line
+        },
+        edges: EdgesGroup {
+            margin: Sides {
+                top: 1.0,
+                bottom: 2.0,
+                ..Sides::ZERO
+            },
+            ..EdgesGroup::INITIAL
+        },
+        ..*root
+    };
+    build(cx, layout, &block, |b| {
+        for n in 0..8 {
+            b.text(NodeKey(100 + n), "XX X ");
+            b.atomic(NodeKey(n), &aligned(n), None, size(n));
+        }
+        b.open_box(NodeKey(200), &aligned(1), None);
+        b.text(NodeKey(201), "X ");
+        b.atomic(NodeKey(8), &aligned(5), None, size(8));
+        b.atomic(NodeKey(9), &aligned(2), None, size(9));
+        b.close_box();
+        b.text(NodeKey(202), " XX");
+    });
+}
+
+/// The size [`aligned_atomics`] builds its `n`th atomic inline with: no
+/// block size and no baseline.
+fn built_size(n: u64) -> BoxSize {
+    BoxSize {
+        inline: 12.0 + n as f32,
+        block: 0.0,
+        baseline: None,
+    }
+}
+
+/// The size set on [`aligned_atomics`]'s `n`th atomic inline after building:
+/// the same inline size, and a block size and baseline of its own.
+fn set_size(n: u64) -> BoxSize {
+    BoxSize {
+        inline: 12.0 + n as f32,
+        block: 8.0 + (n % 4) as f32 * 7.5,
+        baseline: (!n.is_multiple_of(3)).then_some(4.0 + n as f32),
+    }
+}
+
+/// Setting atomic inlines' block sizes and baselines, then breaking again,
+/// equals a layout built with the new sizes, on the first line and after
+/// it, in horizontal and vertical lines alike.
+#[test]
+fn a_relayout_after_set_atomic_sizes_equals_a_fresh_layout() {
+    let root = sized(&AHEM_FAMILY, 10.0);
+    let first_line = sized(&AHEM_FAMILY, 16.0);
+    for writing_mode in [WritingMode::HorizontalTb, WritingMode::VerticalRl] {
+        let block = ComputedBlockStyle {
+            first_line: Some(&first_line),
+            writing_mode,
+            ..ComputedBlockStyle::new(&root)
+        };
+        let mut cx = context();
+        let mut layout = Layout::new();
+        aligned_atomics(&mut cx, &mut layout, block, built_size);
+        layout.break_lines(&mut cx, Area::new(120.0), &mut NoExclusions);
+        assert!(
+            layout.measured().first_line().is_some(),
+            "a first line's measure"
+        );
+        let intrinsic = layout.intrinsic_sizes();
+        assert!(layout.set_atomic_sizes((0..10).map(|n| (NodeKey(n), set_size(n)))));
+        assert_eq!(layout.lines().len(), 0, "setting a size clears the lines");
+        assert_eq!(layout.intrinsic_sizes(), intrinsic);
+        let mut fresh = Layout::new();
+        aligned_atomics(&mut cx, &mut fresh, block, set_size);
+        for width in [120.0, 45.0, 400.0] {
+            layout.break_lines(&mut cx, Area::new(width), &mut NoExclusions);
+            fresh.break_lines(&mut cx, Area::new(width), &mut NoExclusions);
+            assert!(layout.lines().len() > 1 || width == 400.0);
+            assert_eq!(
+                laid_out(&layout),
+                laid_out(&fresh),
+                "{writing_mode:?} at {width}"
+            );
+        }
+        // One atomic inline at a time sets the same.
+        let mut one_by_one = Layout::new();
+        aligned_atomics(&mut cx, &mut one_by_one, block, built_size);
+        for n in 0..10 {
+            assert!(one_by_one.set_atomic_size(NodeKey(n), set_size(n)));
+        }
+        one_by_one.break_lines(&mut cx, Area::new(400.0), &mut NoExclusions);
+        assert_eq!(laid_out(&one_by_one), laid_out(&fresh), "{writing_mode:?}");
+    }
+}
+
+/// Sizes in reverse document order, or shuffled, set what sizes in
+/// document order do.
+#[test]
+fn atomic_sizes_in_any_order_set_the_same() {
+    let root = sized(&AHEM_FAMILY, 10.0);
+    let block = ComputedBlockStyle::new(&root);
+    let mut cx = context();
+    let mut forward = Layout::new();
+    let mut backward = Layout::new();
+    let mut shuffled = Layout::new();
+    for layout in [&mut forward, &mut backward, &mut shuffled] {
+        aligned_atomics(&mut cx, layout, block, built_size);
+    }
+    let pair = |n: u64| (NodeKey(n), set_size(n));
+    assert!(forward.set_atomic_sizes((0..10).map(pair)));
+    assert!(backward.set_atomic_sizes((0..10).rev().map(pair)));
+    assert!(shuffled.set_atomic_sizes([7, 2, 9, 0, 5, 3, 8, 1, 6, 4].map(pair)));
+    for width in [45.0, 120.0] {
+        for layout in [&mut forward, &mut backward, &mut shuffled] {
+            layout.break_lines(&mut cx, Area::new(width), &mut NoExclusions);
+        }
+        assert_eq!(laid_out(&backward), laid_out(&forward), "at {width}");
+        assert_eq!(laid_out(&shuffled), laid_out(&forward), "at {width}");
+    }
+}
+
+/// A key two atomic inlines share sets both, and the atomic inline keyed
+/// otherwise between them its own size.
+#[test]
+fn a_shared_key_sets_every_atomic_inline_keyed_so() {
+    let root = sized(&AHEM_FAMILY, 10.0);
+    let block = ComputedBlockStyle::new(&root);
+    let size = |block: f32| BoxSize {
+        inline: 20.0,
+        block,
+        baseline: Some(block / 2.0),
+    };
+    let atomics = |cx: &mut Context, layout: &mut Layout, shared: f32, own: f32| {
+        build(cx, layout, &block, |b| {
+            b.atomic(NodeKey(5), &root, None, size(shared));
+            b.text(NodeKey(1), "XX ");
+            b.atomic(NodeKey(6), &root, None, size(own));
+            b.text(NodeKey(2), " XX ");
+            b.atomic(NodeKey(5), &root, None, size(shared));
+        });
+    };
+    let mut cx = context();
+    let mut layout = Layout::new();
+    atomics(&mut cx, &mut layout, 10.0, 10.0);
+    assert!(layout.set_atomic_sizes([(NodeKey(6), size(14.0)), (NodeKey(5), size(32.0))]));
+    let mut fresh = Layout::new();
+    atomics(&mut cx, &mut fresh, 32.0, 14.0);
+    for width in [40.0, 400.0] {
+        layout.break_lines(&mut cx, Area::new(width), &mut NoExclusions);
+        fresh.break_lines(&mut cx, Area::new(width), &mut NoExclusions);
+        assert_eq!(laid_out(&layout), laid_out(&fresh), "at {width}");
+    }
+    let blocks: Vec<_> = layout
+        .lines()
+        .flat_map(|line| line.all_items())
+        .filter_map(|item| match item {
+            Item::Atomic(atomic) => Some((atomic.key(), atomic.block())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(blocks.len(), 3);
+    assert_eq!(blocks[0], blocks[2], "both keyed 5 are set");
+    assert_ne!(blocks[0].1, blocks[1].1);
+}
+
+/// Setting atomic inlines' sizes refuses, and changes nothing, where the
+/// content would need building again: a key no atomic inline has, a box
+/// keyed so that is no atomic inline, a size along the line it was not
+/// built with, and content with ruby. A pair refused after one that would
+/// be set refuses the whole call.
+#[test]
+fn set_atomic_sizes_refuses_what_needs_a_rebuild() {
+    let mut cx = context();
+    let mut layout = Layout::new();
+    let root = sized(&AHEM_FAMILY, 10.0);
+    let size = BoxSize {
+        inline: 20.0,
+        block: 10.0,
+        baseline: Some(8.0),
+    };
+    build(&mut cx, &mut layout, &ComputedBlockStyle::new(&root), |b| {
+        b.open_box(NodeKey(1), &root, None);
+        b.text(NodeKey(2), "XX ");
+        b.close_box();
+        b.atomic(NodeKey(3), &root, None, size);
+        b.atomic(NodeKey(4), &root, None, size);
+    });
+    layout.break_lines(&mut cx, Area::new(100.0), &mut NoExclusions);
+    let before = laid_out(&layout);
+    let taller = BoxSize {
+        block: 30.0,
+        ..size
+    };
+    let wider = BoxSize {
+        inline: 21.0,
+        ..taller
+    };
+    assert!(!layout.set_atomic_size(NodeKey(9), taller));
+    assert!(!layout.set_atomic_size(NodeKey(1), taller));
+    assert!(!layout.set_atomic_size(NodeKey(3), wider));
+    // Each refusal comes after a pair that would be set.
+    assert!(!layout.set_atomic_sizes([(NodeKey(3), taller), (NodeKey(9), taller)]));
+    assert!(!layout.set_atomic_sizes([(NodeKey(3), taller), (NodeKey(4), wider)]));
+    assert_eq!(laid_out(&layout), before, "a refusal keeps the lines");
+    layout.break_lines(&mut cx, Area::new(100.0), &mut NoExclusions);
+    assert_eq!(laid_out(&layout), before, "a refusal sets no size");
+    // Sizes that change nothing keep the lines.
+    assert!(layout.set_atomic_sizes([(NodeKey(3), size), (NodeKey(4), size)]));
+    assert_eq!(laid_out(&layout), before, "the same sizes keep the lines");
+    assert!(layout.set_atomic_sizes([(NodeKey(3), taller), (NodeKey(4), taller)]));
+    assert_eq!(layout.lines().len(), 0, "a new size clears the lines");
+
+    build(&mut cx, &mut layout, &ComputedBlockStyle::new(&root), |b| {
+        b.open_ruby(NodeKey(1), &root, None);
+        b.atomic(NodeKey(3), &root, None, size);
+        b.open_annotation(NodeKey(4), &root, None);
+        b.text(NodeKey(5), "X");
+        b.close_annotation();
+        b.close_ruby();
+    });
+    assert!(!layout.set_atomic_size(NodeKey(3), taller));
+}
+
+/// Text with `count` atomic inlines keyed `0..count`, the `n`th built with
+/// [`built_size`] of `n` modulo 10.
+#[cfg(debug_assertions)]
+fn many_atomics(cx: &mut Context, layout: &mut Layout, block: &ComputedBlockStyle<'_>, count: u64) {
+    let root = block.style;
+    build(cx, layout, block, |b| {
+        for n in 0..count {
+            b.text(NodeKey(100_000 + n), "XX ");
+            b.atomic(NodeKey(n), root, None, built_size(n % 10));
+        }
+    });
+}
+
+/// Setting the sizes of atomic inlines in document order costs steps
+/// linear in their number: each search starts where the one before ended.
+///
+/// Twice the atomic inlines take at most about twice the steps. Steps are
+/// counted in debug builds only.
+#[cfg(debug_assertions)]
+#[test]
+fn setting_atomic_sizes_in_order_costs_linear_steps() {
+    use crate::work;
+    let root = sized(&AHEM_FAMILY, 10.0);
+    let block = ComputedBlockStyle::new(&root);
+    let mut cx = context();
+    let mut steps = |count: u64| {
+        let mut layout = Layout::new();
+        many_atomics(&mut cx, &mut layout, &block, count);
+        let _ = work::take();
+        let pairs = (0..count).map(|n| (NodeKey(n), set_size(n % 10)));
+        assert!(layout.set_atomic_sizes(pairs));
+        work::take()
+    };
+    let (small, large) = (steps(300), steps(600));
+    assert!(small > 0);
+    assert!(large <= small * 5 / 2, "{small} steps, then {large}");
 }

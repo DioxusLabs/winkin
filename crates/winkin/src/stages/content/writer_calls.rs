@@ -8,15 +8,16 @@ use super::map::Map;
 use super::transform::Transforms;
 use super::writer::OpenId;
 use super::{
-    Absolute, Atomic, BreakClearance, ContainerKind, Content, ContentFlags, ContentWriter,
-    FirstLetter, Float, ItemFlags, ItemKind, LoweredNode, MAX_RUBY_DEPTH, Mirror, NodeFacts,
-    NodeId, NodeKey, NodeKind, OBJECT, Open, TextFlags,
+    Absolute, Atomic, AtomicId, BreakClearance, ContainerKind, Content, ContentFlags,
+    ContentWriter, FirstLetter, Float, ItemFlags, ItemKind, LoweredNode, MAX_RUBY_DEPTH, Mirror,
+    NodeFacts, NodeId, NodeKey, NodeKind, OBJECT, Open, TextFlags,
 };
 use crate::build::{BoxSize, BuildReport, Clear, FloatSide, OriginalDisplay};
-use crate::data::TextOffset;
+use crate::data::{HashIndex, TextOffset, hash_one};
 use crate::style::{
     ComputedStyle, FirstLineVariant, RubyGroup, RubyPosition, TextCombineUpright, WhiteSpaceTrim,
 };
+use alloc::boxed::Box;
 
 impl ContentWriter<'_> {
     /// Writes text from the text node `key`. Where a first letter is asked
@@ -380,14 +381,47 @@ impl ContentWriter<'_> {
             self.content.record(|map| map.generated(0..1, at));
             let writing_mode = self.content.block.writing_mode;
             let atomic = Atomic::new(item, size, style, writing_mode);
-            self.content
-                .extras_mut()
-                .atomics
-                .push_bounded(atomic, "an atomic has an item, and fits where it does");
+            let atomics = &mut self.content.extras_mut().atomics;
+            let id = atomics.next_id();
+            atomics.push_bounded(atomic, "an atomic has an item, and fits where it does");
+            self.note_atomic_key(key, id);
         }
         self.end_leaf(node);
         self.last_char = ' ';
         self.content.flags.insert(ContentFlags::ATOMICS);
+    }
+
+    /// Notes that atomic inline `atomic` is keyed `key`, and flags the
+    /// content where an atomic inline before it has the same key.
+    ///
+    /// Once two share a key, it notes no more: the flag is all a search by
+    /// key reads.
+    fn note_atomic_key(&mut self, key: NodeKey, atomic: AtomicId) {
+        if self
+            .content
+            .flags
+            .contains(ContentFlags::SHARED_ATOMIC_KEYS)
+        {
+            return;
+        }
+        let hash = hash_one(&key);
+        let content = &*self.content;
+        let atomics = content.atomics();
+        let atomic_keys = self
+            .atomic_keys
+            .get_or_insert_with(|| Box::new(HashIndex::new()));
+        let shared = atomic_keys
+            .find::<AtomicId>(hash, |earlier| {
+                atomics
+                    .get(earlier)
+                    .is_some_and(|earlier| content.atomic_key(earlier) == key)
+            })
+            .is_some();
+        if shared {
+            self.content.flags.insert(ContentFlags::SHARED_ATOMIC_KEYS);
+        } else {
+            atomic_keys.insert(hash, atomic);
+        }
     }
 
     /// Writes a float's anchor, which takes no text and is opaque to

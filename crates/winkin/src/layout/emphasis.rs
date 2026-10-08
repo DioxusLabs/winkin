@@ -4,7 +4,9 @@
 //!   looked up by the run's key, as Chrome draws the style's mark string in
 //!   the text's font at half its size (`Font::DrawEmphasisMarks`). The crate
 //!   gives the mark's middle along the line, its baseline across it, and its
-//!   size.
+//!   size. The caller centres the mark glyph's ink bounds on that middle,
+//!   upright in vertical text too, as Blink centres the glyph's bounds
+//!   (`AddEmphasisMark`, `BoundsForGlyph`).
 //! - **Each grapheme cluster that takes a mark gets one.** Its middle is the
 //!   cluster's, less half the cluster's letter-spacing, as Blink centres a
 //!   mark (`AddEmphasisMark`). A ligature's advance is shared evenly among
@@ -40,8 +42,11 @@ use crate::work;
 
 /// The position and size of an emphasis mark.
 ///
-/// Draw the mark specified by the style centered on `x`, at `baseline`
-/// and font size `size`.
+/// Draw the mark specified by the style at font size `size`, on `baseline`,
+/// with the center of its glyph's ink bounds on `x`. Center the ink, not the
+/// advance or the font's ascent and descent, in vertical text as in
+/// horizontal text: those move the mark by the font's bearings, or by where
+/// its ink sits between its ascent and descent. This matches Chrome.
 #[derive(Copy, Clone, PartialEq, Debug)]
 #[non_exhaustive]
 pub struct EmphasisMark {
@@ -49,7 +54,7 @@ pub struct EmphasisMark {
     ///
     /// Its style determines the mark shape and color.
     pub key: NodeKey,
-    /// The center along the line, relative to line-box left.
+    /// The center of the mark's ink along the line, relative to line-box left.
     pub x: f32,
     /// The baseline offset from line-box top.
     pub baseline: f32,

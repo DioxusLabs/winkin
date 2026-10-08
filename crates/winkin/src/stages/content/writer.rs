@@ -41,7 +41,7 @@ use super::memo::StyleMemo;
 use super::transform::Transforms;
 use super::{BlockFacts, Content, ItemId, NodeId, NodeKey, NodeKind};
 use crate::build::{BuildOptions, BuildReport};
-use crate::data::{Id, Table, TextOffset, define_id, heap_bytes};
+use crate::data::{HashIndex, Id, Table, TextOffset, define_id, heap_bytes};
 use crate::style::ComputedBlockStyle;
 
 /// The most the content may hold: the ids' own limits and the text's,
@@ -104,6 +104,9 @@ pub(crate) struct ContentScratch {
     open: Table<OpenId, Open>,
     words: String,
     memo: Option<Box<StyleMemo>>,
+    /// The atomic inlines written so far by the hash of their keys, to find
+    /// two that share one: made the first time a build writes one.
+    atomic_keys: Option<Box<HashIndex>>,
 }
 
 impl ContentScratch {
@@ -113,12 +116,13 @@ impl ContentScratch {
             open: Table::new(),
             words: String::new(),
             memo: None,
+            atomic_keys: None,
         }
     }
 }
 
 heap_bytes! {
-    ContentScratch { open, words, memo }
+    ContentScratch { open, words, memo, atomic_keys }
 }
 
 define_id! {
@@ -151,8 +155,12 @@ impl<'a> ContentWriter<'a> {
             open: stack,
             words,
             memo,
+            atomic_keys,
         } = scratch;
         stack.clear();
+        if let Some(atomic_keys) = atomic_keys {
+            atomic_keys.clear();
+        }
         if let Some(memo) = memo {
             memo.clear();
         }
@@ -161,6 +169,7 @@ impl<'a> ContentWriter<'a> {
             stack,
             words,
             memo,
+            atomic_keys,
             block_transforms: Transforms::NONE,
             collapser: Collapser::new(),
             last_char: ' ',
