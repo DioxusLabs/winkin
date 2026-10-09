@@ -25,7 +25,7 @@ impl ContentWriter<'_> {
     /// for and not yet found, the text splits at the letter's end.
     pub(crate) fn text(&mut self, key: NodeKey, text: &str) {
         if !self.content.flags.contains(ContentFlags::MATH_AUTO) {
-            self.write_text_call(key, text);
+            self.write_text_call(key, text, false);
             return;
         }
         self.math_auto_text(key, text);
@@ -35,7 +35,7 @@ impl ContentWriter<'_> {
     #[inline(never)]
     fn math_auto_text(&mut self, key: NodeKey, text: &str) {
         if self.math_key == Some(key) {
-            self.write_text_call(key, text);
+            self.write_text_call(key, text, false);
             self.math_key = Some(key);
             return;
         }
@@ -44,11 +44,9 @@ impl ContentWriter<'_> {
                 self.math_text = Some((held_key, ch));
                 return;
             }
-            self.math_single = held_key != key;
-            self.write_text_call(held_key, ch.encode_utf8(&mut [0; 4]));
-            self.math_single = false;
+            self.write_text_call(held_key, ch.encode_utf8(&mut [0; 4]), held_key != key);
             if held_key == key {
-                self.write_text_call(key, text);
+                self.write_text_call(key, text, false);
                 self.math_key = Some(key);
                 return;
             }
@@ -74,23 +72,24 @@ impl ContentWriter<'_> {
                 return;
             }
         }
-        self.write_text_call(key, text);
+        self.write_text_call(key, text, false);
         self.math_key = (math && !text.is_empty()).then_some(key);
     }
 
-    /// Writes one call with the source node's mathematical eligibility settled.
+    /// Writes one call, `single` where `text` is the whole of a one-character
+    /// source node `math-auto` may map.
     #[inline]
-    pub(super) fn write_text_call(&mut self, key: NodeKey, text: &str) {
+    pub(super) fn write_text_call(&mut self, key: NodeKey, text: &str, single: bool) {
         match self.first_letter {
             FirstLetter::Armed { .. } | FirstLetter::Punctuation { .. } if !self.full => {
-                self.text_with_first_letter(key, text);
+                self.text_with_first_letter(key, text, single);
             }
-            _ => self.plain_text(key, text),
+            _ => self.plain_text(key, text, single),
         }
     }
 
     /// Writes text from the text node `key`, with no first letter in it.
-    pub(super) fn plain_text(&mut self, key: NodeKey, text: &str) {
+    pub(super) fn plain_text(&mut self, key: NodeKey, text: &str, single: bool) {
         let continues = self.text_node_keyed(key).is_some();
         if self.full {
             // Nothing more fits: the text goes, and its node if it needed one.
@@ -128,7 +127,7 @@ impl ContentWriter<'_> {
                 node
             }
         };
-        self.write_node_text(node, text);
+        self.write_node_text(node, text, single);
     }
 
     /// Writes `text` for `node`, the current text node.
@@ -136,7 +135,7 @@ impl ContentWriter<'_> {
     /// The text follows the white space rules of the node's text facts. It
     /// is transformed as its container says. Where the first-line style
     /// transforms otherwise, the first line's text follows that style.
-    pub(super) fn write_node_text(&mut self, node: NodeId, text: &str) {
+    pub(super) fn write_node_text(&mut self, node: NodeId, text: &str, single: bool) {
         self.reserve_text(text.len());
         let facts = self.text_facts(node);
         let (mode, wraps) = (facts.collapse, facts.has(TextFlags::WRAPS));
@@ -150,7 +149,7 @@ impl ContentWriter<'_> {
             Mirror::Waiting | Mirror::Writing => transforms,
         };
         let transforms = if self.content.flags.contains(ContentFlags::MATH_AUTO) {
-            transforms.with_node(self.math_single, text)
+            transforms.with_node(single, text)
         } else {
             transforms
         };

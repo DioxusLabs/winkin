@@ -176,7 +176,6 @@ impl<'a> ContentWriter<'a> {
             text_node: None,
             math_text: None,
             math_key: None,
-            math_single: false,
             open_item: None,
             source: 0,
             run_unit: None,

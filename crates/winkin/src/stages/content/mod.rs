@@ -1377,8 +1377,6 @@ pub(crate) struct ContentWriter<'a> {
     math_text: Option<(NodeKey, char)>,
     /// A source text node already known to contain more than one character.
     math_key: Option<NodeKey>,
-    /// The held character is being written as the whole source node.
-    math_single: bool,
     /// That node's item text is appended to, once it has one.
     open_item: Option<ItemId>,
     /// How far the writer has got in the text the caller gave the text

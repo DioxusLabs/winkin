@@ -104,9 +104,7 @@ impl ContentWriter<'_> {
     /// written as the whole of it.
     pub(super) fn end_math_text(&mut self) {
         if let Some((key, ch)) = self.math_text.take() {
-            self.math_single = true;
-            self.write_text_call(key, ch.encode_utf8(&mut [0; 4]));
-            self.math_single = false;
+            self.write_text_call(key, ch.encode_utf8(&mut [0; 4]), true);
         }
         self.math_key = None;
     }
