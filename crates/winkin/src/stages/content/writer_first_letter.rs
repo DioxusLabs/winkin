@@ -5,11 +5,11 @@ use super::collapse::Event;
 use super::first_letter::FirstLetterScan;
 use super::memo::StyleKey;
 use super::{
-    ContainerKind, ContentWriter, FirstLetter, InitialLetterUse, ItemFlags, ItemKind, NodeFacts,
-    NodeId, NodeKey, NodeKind, Open,
+    ContainerKind, ContentFlags, ContentWriter, FirstLetter, InitialLetterUse, ItemFlags, ItemKind,
+    NodeFacts, NodeId, NodeKey, NodeKind, Open,
 };
 use crate::style::{
-    BidiGroup, ComputedStyle, Direction, FirstLineVariant, InitialLetter, UnicodeBidi,
+    BidiGroup, ComputedStyle, Direction, FirstLineVariant, InitialLetter, TextCase, UnicodeBidi,
     WhiteSpaceTrim,
 };
 
@@ -30,6 +30,9 @@ impl ContentWriter<'_> {
         style: &ComputedStyle<'_>,
         first_line: Option<&ComputedStyle<'_>>,
     ) {
+        if self.math_text.is_some() {
+            self.end_text();
+        }
         if !matches!(
             self.first_letter,
             FirstLetter::Unarmed | FirstLetter::Armed { .. }
@@ -51,6 +54,11 @@ impl ContentWriter<'_> {
             Some(first_line) => self.key(&letter.apply(&style.pinned_first_line(first_line))),
             None => own,
         });
+        if own.text.transform.case == TextCase::MathAuto
+            || first_line.is_some_and(|s| s.text.transform.case == TextCase::MathAuto)
+        {
+            self.content.flags.insert(ContentFlags::MATH_AUTO);
+        }
         self.first_letter = FirstLetter::Armed {
             key,
             style: own,

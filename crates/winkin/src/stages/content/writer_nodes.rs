@@ -49,6 +49,9 @@ impl ContentWriter<'_> {
     /// Closes the innermost container.
     pub(super) fn pop(&mut self) {
         work::step();
+        if self.math_text.is_some() {
+            self.end_text();
+        }
         let Some(open) = self.stack.pop() else {
             return;
         };
@@ -87,6 +90,12 @@ impl ContentWriter<'_> {
 
     /// Ends the current text node, if any: it takes no more text.
     pub(super) fn end_text(&mut self) {
+        if let Some((key, ch)) = self.math_text.take() {
+            self.math_single = true;
+            self.write_text_call(key, ch.encode_utf8(&mut [0; 4]));
+            self.math_single = false;
+        }
+        self.math_key = None;
         if let Some(node) = self.text_node.take() {
             self.end_leaf(node);
         }

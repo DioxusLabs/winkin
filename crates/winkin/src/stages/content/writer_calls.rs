@@ -15,7 +15,8 @@ use super::{
 use crate::build::{BoxSize, BuildReport, Clear, FloatSide, OriginalDisplay};
 use crate::data::{HashIndex, TextOffset, hash_one};
 use crate::style::{
-    ComputedStyle, FirstLineVariant, RubyGroup, RubyPosition, TextCombineUpright, WhiteSpaceTrim,
+    ComputedStyle, FirstLineVariant, RubyGroup, RubyPosition, TextCase, TextCombineUpright,
+    WhiteSpaceTrim,
 };
 use alloc::boxed::Box;
 
@@ -23,6 +24,61 @@ impl ContentWriter<'_> {
     /// Writes text from the text node `key`. Where a first letter is asked
     /// for and not yet found, the text splits at the letter's end.
     pub(crate) fn text(&mut self, key: NodeKey, text: &str) {
+        if !self.content.flags.contains(ContentFlags::MATH_AUTO) {
+            self.write_text_call(key, text);
+            return;
+        }
+        self.math_auto_text(key, text);
+    }
+
+    /// Resolves a source node's length before writing its mathematical transform.
+    fn math_auto_text(&mut self, key: NodeKey, text: &str) {
+        if self.math_key == Some(key) {
+            self.write_text_call(key, text);
+            self.math_key = Some(key);
+            return;
+        }
+        if let Some((held_key, ch)) = self.math_text.take() {
+            if held_key == key && text.is_empty() {
+                self.math_text = Some((held_key, ch));
+                return;
+            }
+            self.math_single = held_key != key;
+            self.write_text_call(held_key, ch.encode_utf8(&mut [0; 4]));
+            self.math_single = false;
+            if held_key == key {
+                self.write_text_call(key, text);
+                self.math_key = Some(key);
+                return;
+            }
+        }
+        let letter_math = match self.first_letter {
+            FirstLetter::Armed {
+                style, first_line, ..
+            } => {
+                style.text.transform.case == TextCase::MathAuto
+                    || first_line.is_some_and(|s| s.text.transform.case == TextCase::MathAuto)
+            }
+            _ => false,
+        };
+        let math = self.container_transforms().has_math_auto() || letter_math;
+        if math {
+            let mut chars = text.chars();
+            if let Some(ch) = chars.next().filter(|_| chars.next().is_none()) {
+                if self.text_node_keyed(key).is_none() {
+                    self.end_text();
+                }
+                self.math_text = Some((key, ch));
+                return;
+            }
+        }
+        self.write_text_call(key, text);
+        self.math_key = (math && !text.is_empty()).then_some(key);
+    }
+
+    /// Writes one call with the source node's mathematical eligibility settled.
+    #[inline]
+    pub(super) fn write_text_call(&mut self, key: NodeKey, text: &str) {
         match self.first_letter {
             FirstLetter::Armed { .. } | FirstLetter::Punctuation { .. } if !self.full => {
                 self.text_with_first_letter(key, text);
@@ -90,6 +146,11 @@ impl ContentWriter<'_> {
         let transforms = match self.mirror {
             Mirror::Done => Transforms::new(transforms.own, None),
             Mirror::Waiting | Mirror::Writing => transforms,
+        };
+        let transforms = if self.content.flags.contains(ContentFlags::MATH_AUTO) {
+            transforms.with_node(self.math_single, text)
+        } else {
+            transforms
         };
         self.write_text(mode, wraps, transforms, text);
     }
