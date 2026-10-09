@@ -32,6 +32,7 @@ impl ContentWriter<'_> {
     }
 
     /// Resolves a source node's length before writing its mathematical transform.
+    #[inline(never)]
     fn math_auto_text(&mut self, key: NodeKey, text: &str) {
         if self.math_key == Some(key) {
             self.write_text_call(key, text);
@@ -56,8 +57,9 @@ impl ContentWriter<'_> {
             FirstLetter::Armed {
                 style, first_line, ..
             } => {
-                style.text.transform.case == TextCase::MathAuto
-                    || first_line.is_some_and(|s| s.text.transform.case == TextCase::MathAuto)
+                matches!(style.text.transform.case, TextCase::MathAuto)
+                    || first_line
+                        .is_some_and(|s| matches!(s.text.transform.case, TextCase::MathAuto))
             }
             _ => false,
         };
@@ -606,8 +608,12 @@ impl ContentWriter<'_> {
     /// Writes a break opportunity, `<wbr>`, as a generated U+200B.
     ///
     /// It goes in the current text node, or between nodes in the box around
-    /// it. It is opaque to collapsing.
+    /// it. It is opaque to collapsing, and ends the source text node
+    /// `math-auto` measures, as an element between two text nodes does.
     pub(crate) fn break_opportunity(&mut self) {
+        if self.content.flags.contains(ContentFlags::MATH_AUTO) {
+            self.end_math_text();
+        }
         if self.full {
             return;
         }

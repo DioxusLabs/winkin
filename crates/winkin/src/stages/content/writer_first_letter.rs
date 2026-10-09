@@ -54,8 +54,8 @@ impl ContentWriter<'_> {
             Some(first_line) => self.key(&letter.apply(&style.pinned_first_line(first_line))),
             None => own,
         });
-        if own.text.transform.case == TextCase::MathAuto
-            || first_line.is_some_and(|s| s.text.transform.case == TextCase::MathAuto)
+        if matches!(own.text.transform.case, TextCase::MathAuto)
+            || first_line.is_some_and(|s| matches!(s.text.transform.case, TextCase::MathAuto))
         {
             self.content.flags.insert(ContentFlags::MATH_AUTO);
         }

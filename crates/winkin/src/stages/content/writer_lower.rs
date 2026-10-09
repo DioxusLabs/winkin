@@ -108,7 +108,7 @@ impl ContentWriter<'_> {
         } = &mut *self.content;
         let writing_mode = block.writing_mode;
         let (languages, lookup) = lists.lowering();
-        if style.text.transform.case == TextCase::MathAuto {
+        if matches!(style.text.transform.case, TextCase::MathAuto) {
             flags.insert(ContentFlags::MATH_AUTO);
         }
         let mut new = ContentFlags::NONE;

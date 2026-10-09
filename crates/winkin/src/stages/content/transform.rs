@@ -133,7 +133,7 @@ impl TextTransformer {
         langid: &'static LanguageIdentifier,
         keeps_spaces: bool,
     ) -> Self {
-        let transform = if transform.case == TextCase::MathAuto {
+        let transform = if matches!(transform.case, TextCase::MathAuto) {
             TextTransform::MATH_AUTO
         } else {
             transform
@@ -152,7 +152,7 @@ impl TextTransformer {
     /// needed.
     ///
     /// It writes nothing past what the transform makes, so a caller that
-    /// left room for [`Self::max_growth`] times `src` has room for all
+    /// left room for [`MAX_TRANSFORM_GROWTH`] times `src` has room for all
     /// of it.
     pub(super) fn write(&self, src: &str, before: char, scratch: &mut String, out: &mut String) {
         if self.transform.full_width || self.transform.full_size_kana {
@@ -163,17 +163,19 @@ impl TextTransformer {
                 keeps_spaces: self.keeps_spaces,
             };
             self.write_case(src, before, scratch, &mut mapped);
+        } else if matches!(self.transform.case, TextCase::MathAuto) {
+            Self::write_math(src, out);
         } else {
             self.write_case(src, before, scratch, out);
         }
     }
 
-    /// The most bytes this transform makes of one source byte.
-    pub(super) fn max_growth(&self) -> usize {
-        if self.transform.case == TextCase::MathAuto {
-            4
-        } else {
-            MAX_TRANSFORM_GROWTH
+    /// Writes the mathematical italic form of each character to `out`.
+    #[cold]
+    #[inline(never)]
+    fn write_math(src: &str, out: &mut String) {
+        for ch in src.chars() {
+            out.push(math_italic(ch).unwrap_or(ch));
         }
     }
 
@@ -188,14 +190,7 @@ impl TextTransformer {
         let langid = self.langid;
         // Writing into a string never fails.
         let _ = match self.transform.case {
-            TextCase::None => sink.write_str(src),
-            TextCase::MathAuto => {
-                let mut result = Ok(());
-                for ch in src.chars() {
-                    result = result.and_then(|()| sink.write_char(math_italic(ch).unwrap_or(ch)));
-                }
-                result
-            }
+            TextCase::None | TextCase::MathAuto => sink.write_str(src),
             TextCase::Uppercase => CASE.uppercase(src, langid).write_to(sink),
             TextCase::Lowercase => CASE.lowercase(src, langid).write_to(sink),
             TextCase::Capitalize => {
@@ -285,26 +280,18 @@ impl Transforms {
     pub(super) fn has_math_auto(&self) -> bool {
         [self.own, self.first_line()]
             .into_iter()
-            .any(|transformer| transformer.is_some_and(|t| t.transform.case == TextCase::MathAuto))
+            .any(|transformer| {
+                transformer.is_some_and(|t| matches!(t.transform.case, TextCase::MathAuto))
+            })
     }
 
     /// Disables `math-auto` where the source node is not one mapped character.
     pub(super) fn with_node(self, single: bool, text: &str) -> Self {
         let eligible = || single && text.chars().next().and_then(math_italic).is_some();
         let resolve = |t: Option<TextTransformer>| {
-            t.filter(|t| t.transform.case != TextCase::MathAuto || eligible())
+            t.filter(|t| !matches!(t.transform.case, TextCase::MathAuto) || eligible())
         };
         Self::new(resolve(self.own), self.first_line.map(resolve))
-    }
-
-    /// The most bytes either variant makes of one source byte.
-    pub(super) fn max_growth(&self) -> usize {
-        self.own
-            .map_or(MAX_TRANSFORM_GROWTH, |t| t.max_growth())
-            .max(
-                self.first_line()
-                    .map_or(MAX_TRANSFORM_GROWTH, |t| t.max_growth()),
-            )
     }
 
     /// Whether the first line transforms the text otherwise than its own
@@ -367,10 +354,10 @@ impl Transforms {
 
 /// The most bytes a transform makes of one byte of text.
 ///
-/// A full-width form of ASCII is three bytes of one, and no case mapping
-/// does more. The writer leaves this much room before it writes a
-/// transform.
-pub(super) const MAX_TRANSFORM_GROWTH: usize = 3;
+/// A mathematical italic letter is four bytes of one of ASCII, a full-width
+/// form three, and no case mapping does more. The writer leaves this much
+/// room before it writes a transform.
+pub(super) const MAX_TRANSFORM_GROWTH: usize = 4;
 
 /// MathML Core's italic mappings.
 /// <https://w3c.github.io/mathml-core/#italic-mappings>
